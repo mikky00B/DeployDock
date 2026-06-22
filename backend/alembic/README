@@ -1,0 +1,3 @@
+Alembic migration environment for DeployDock.
+
+Milestone 1 will add database models and the first real migration.
