@@ -23,9 +23,24 @@ export function RegisterPage() {
 
   return (
     <main className="auth-page">
+      <section className="auth-intro" aria-label="DeployDock overview">
+        <div className="auth-brand-mark">DeployDock</div>
+        <h1>Bring your VPS deployment flow under control.</h1>
+        <p>
+          Start with one server, save repeatable deploy commands, and grow into a cleaner release workflow without
+          adding orchestration overhead.
+        </p>
+        <div className="auth-proof-grid" aria-label="Deployment workflow highlights">
+          <span>Server inventory</span>
+          <span>App registry</span>
+          <span>Logs</span>
+          <span>Rollbacks</span>
+        </div>
+      </section>
       <section className="auth-panel" aria-labelledby="register-title">
         <div className="auth-brand">DeployDock</div>
         <h1 id="register-title">Create account</h1>
+        <p className="auth-panel-copy">Create a local DeployDock workspace.</p>
         <form className="auth-form" onSubmit={(event) => void handleSubmit(event)}>
           <label>
             Full name

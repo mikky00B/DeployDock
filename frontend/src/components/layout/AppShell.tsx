@@ -20,9 +20,11 @@ export function AppShell({ activeRoute, children }: AppShellProps) {
     <main className="app-shell">
       <aside className="sidebar">
         <button className="brand-button" type="button" onClick={() => navigateTo("/dashboard")}>
-          DeployDock
+          <span>DeployDock</span>
+          <small>Deployment control panel</small>
         </button>
         <nav aria-label="Primary navigation">
+          <p className="nav-group-label">Workspace</p>
           {navItems.map((item) => (
             <button
               className={activeRoute === item.route ? "nav-link active" : "nav-link"}
@@ -42,6 +44,7 @@ export function AppShell({ activeRoute, children }: AppShellProps) {
             <p className="eyebrow">DeployDock</p>
             <h1>{routeTitle(activeRoute)}</h1>
           </div>
+          <p className="topbar-copy">Self-hosted deployment control for existing VPS apps.</p>
           <div className="account-menu">
             <span>{user?.email}</span>
             <button className="secondary-button" type="button" onClick={() => void signOut()}>

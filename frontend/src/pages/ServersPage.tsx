@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 import { createServer, deleteServer, getServer, listServers, testServerConnection, updateServer } from "../api/servers";
-import { StatusBadge } from "../components/common";
+import { EmptyState, formatDateTime, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 import { navigateTo } from "../routes";
 import type { Server, ServerStatus } from "../types/server";
@@ -24,6 +24,7 @@ export function ServersPage() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [testingServerId, setTestingServerId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -72,6 +73,7 @@ export function ServersPage() {
     if (!token) return;
     setError(null);
     setNotice(null);
+    setTestingServerId(serverId);
     try {
       const result = await testServerConnection(token, serverId);
       const refreshed = await listServers(token);
@@ -83,6 +85,8 @@ export function ServersPage() {
       }
     } catch (testError) {
       setError(testError instanceof Error ? testError.message : "Could not test connection");
+    } finally {
+      setTestingServerId(null);
     }
   }
 
@@ -99,10 +103,7 @@ export function ServersPage() {
         {error ? <p className="form-error">{error}</p> : null}
         {isLoading ? <p className="muted">Loading servers...</p> : null}
         {!isLoading && servers.length === 0 ? (
-          <div className="empty-panel">
-            <h2>No servers yet</h2>
-            <p>Add the VPS or cloud server that already runs your applications.</p>
-          </div>
+          <EmptyState title="No servers yet" body="Connect your first VPS to start deploying existing server apps." />
         ) : null}
         <div className="resource-list">
           {servers.map((server) => (
@@ -115,8 +116,13 @@ export function ServersPage() {
               </div>
               <StatusBadge label={server.status} tone={serverStatusTone(server.status)} />
               <div className="row-actions">
-                <button className="secondary-button" type="button" onClick={() => void handleTest(server.id)}>
-                  Test
+                <button
+                  className="secondary-button"
+                  disabled={testingServerId === server.id}
+                  type="button"
+                  onClick={() => void handleTest(server.id)}
+                >
+                  {testingServerId === server.id ? "Testing" : "Test"}
                 </button>
                 <button className="danger-button" type="button" onClick={() => void handleDelete(server.id)}>
                   Delete
@@ -130,8 +136,8 @@ export function ServersPage() {
       <aside className="form-panel" aria-labelledby="add-server-title">
         <h2 id="add-server-title">Add server</h2>
         <p className="form-helper">
-          Add an existing VPS or cloud server. Use a dedicated non-root deploy user; DeployDock will generate a unique
-          ed25519 keypair for this server unless you choose the manual private-key option.
+          Add an existing VPS or cloud server. Use a dedicated non-root deploy user. DeployDock generates a unique
+          ed25519 keypair for this server unless you choose advanced manual key upload.
         </p>
         {createdPublicKey ? (
           <PublicKeyPanel publicKey={createdPublicKey} username={createdUsername ?? "deploy"} />
@@ -156,6 +162,8 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isTesting, setIsTesting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -181,6 +189,7 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
     if (!token || !server) return;
     setNotice(null);
     setError(null);
+    setIsSaving(true);
     try {
       const updated = await updateServer(token, server.id, { ...form, port: Number(form.port) });
       setServer(updated);
@@ -188,6 +197,8 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
       setNotice("Server updated");
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Could not update server");
+    } finally {
+      setIsSaving(false);
     }
   }
 
@@ -195,6 +206,7 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
     if (!token || !server) return;
     setNotice(null);
     setError(null);
+    setIsTesting(true);
     try {
       const result = await testServerConnection(token, server.id);
       const refreshed = await getServer(token, server.id);
@@ -202,6 +214,8 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
       setNotice(result.message);
     } catch (testError) {
       setError(testError instanceof Error ? testError.message : "Could not test connection");
+    } finally {
+      setIsTesting(false);
     }
   }
 
@@ -221,6 +235,7 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
         </button>
         <div className="detail-header">
           <div>
+            <p className="eyebrow">Server</p>
             <h2>{server.name}</h2>
             <p>{server.username}@{server.host}:{server.port}</p>
           </div>
@@ -229,13 +244,13 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
         <dl className="detail-list">
           <div><dt>Public key</dt><dd>{server.public_ssh_key ? <PublicKeyBlock publicKey={server.public_ssh_key} /> : "Manual key uploaded"}</dd></div>
           <div><dt>Fingerprint</dt><dd>{server.private_key_fingerprint ?? "Not available"}</dd></div>
-          <div><dt>Last checked</dt><dd>{formatDate(server.last_connection_check_at)}</dd></div>
+          <div><dt>Last checked</dt><dd>{formatDateTime(server.last_connection_check_at) === "Not available" ? "Never" : formatDateTime(server.last_connection_check_at)}</dd></div>
           <div><dt>Last error</dt><dd>{server.last_connection_error ?? "None"}</dd></div>
         </dl>
         {notice ? <p className="success-message">{notice}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}
-        <button className="secondary-button" type="button" onClick={() => void handleTest()}>
-          Test connection
+        <button className="secondary-button" disabled={isTesting} type="button" onClick={() => void handleTest()}>
+          {isTesting ? "Testing connection" : "Test connection"}
         </button>
       </section>
       <aside className="form-panel">
@@ -245,7 +260,7 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
         </p>
         <ServerForm
           form={form}
-          isSubmitting={false}
+          isSubmitting={isSaving}
           privateKeyRequired={false}
           submitLabel="Save server"
           onChange={setForm}
@@ -273,8 +288,8 @@ function ServerForm({
 }) {
   return (
     <form className="resource-form" onSubmit={onSubmit}>
-      <label>Name<input required value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} /></label>
-      <label>Host<input required value={form.host} onChange={(event) => onChange({ ...form, host: event.target.value })} /></label>
+      <label>Name<input required placeholder="Production VPS" value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} /></label>
+      <label>Host<input required placeholder="203.0.113.10 or deploy.example.com" value={form.host} onChange={(event) => onChange({ ...form, host: event.target.value })} /></label>
       <label>Port<input min={1} max={65535} required type="number" value={form.port} onChange={(event) => onChange({ ...form, port: Number(event.target.value) })} /></label>
       <label>
         Deploy username
@@ -289,7 +304,7 @@ function ServerForm({
           onChange={(event) => onChange({ ...form, private_key: event.target.value })}
           rows={7}
         />
-        <span className="field-helper">Recommended: leave blank so DeployDock generates a unique keypair for this server.</span>
+        <span className="field-helper">Advanced/manual mode. Recommended: leave blank so DeployDock generates a unique keypair for this server.</span>
       </label>
       <button className="primary-button" disabled={isSubmitting} type="submit">
         {isSubmitting ? "Saving" : submitLabel}
@@ -305,7 +320,10 @@ function PublicKeyPanel({ publicKey, username }: { publicKey: string; username: 
   return (
     <section className="key-panel" aria-label="Generated public key">
       <h3>Generated public key</h3>
-      <p>Add this public key to the target server deploy user before testing the connection.</p>
+      <p>
+        Use a dedicated non-root deploy user. Add this public key to {authorizedKeysPath} on the target server before
+        testing the connection.
+      </p>
       <PublicKeyBlock publicKey={publicKey} />
       <pre className="command-snippet">
         <code>{`mkdir -p ${sshDirectory}
@@ -348,8 +366,4 @@ function serverStatusTone(status: ServerStatus) {
   if (status === "connected") return "success";
   if (status === "unreachable") return "danger";
   return "neutral";
-}
-
-function formatDate(value: string | null) {
-  return value ? new Date(value).toLocaleString() : "Never";
 }

@@ -8,7 +8,7 @@ def test_development_settings_allow_local_defaults() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.app_env == "development"
-    assert settings.cors_origin_list == ["http://localhost:5173"]
+    assert settings.cors_origin_list == ["http://localhost:5173", "http://127.0.0.1:5173"]
     assert not settings.is_production
 
 

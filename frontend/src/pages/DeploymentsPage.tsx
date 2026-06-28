@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { getDeployment, listAppDeployments, triggerDeployment, triggerRollback } from "../api/deployments";
 import { listApps } from "../api/apps";
-import { StatusBadge } from "../components/common";
+import { CodeValue, EmptyState, formatDateTime, formatDuration, humanizeToken, shortSha, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 import { useDeploymentStream } from "../hooks/useDeploymentStream";
 import { navigateTo } from "../routes";
@@ -42,10 +42,7 @@ export function DeploymentsPage() {
       {error ? <p className="form-error">{error}</p> : null}
       {isLoading ? <p className="muted">Loading deployments...</p> : null}
       {!isLoading && deployments.length === 0 ? (
-        <div className="empty-panel">
-          <h2>No deployments yet</h2>
-          <p>Deploy from an app detail page to start building release history.</p>
-        </div>
+        <EmptyState title="No deployments yet" body="Trigger your first deployment from an app page." />
       ) : null}
       <DeploymentTable deployments={deployments} appNames={appNames} />
     </section>
@@ -55,6 +52,7 @@ export function DeploymentsPage() {
 export function DeploymentDetailPage({ deploymentId }: { deploymentId: string }) {
   const { token } = useAuth();
   const [deployment, setDeployment] = useState<DeploymentDetail | null>(null);
+  const [appName, setAppName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -69,9 +67,10 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
   useEffect(() => {
     if (!token) return;
     setIsLoading(true);
-    getDeployment(token, deploymentId)
-      .then((loadedDeployment) => {
+    Promise.all([getDeployment(token, deploymentId), listApps(token)])
+      .then(([loadedDeployment, loadedApps]) => {
         setDeployment(loadedDeployment);
+        setAppName(loadedApps.find((app) => app.id === loadedDeployment.app_id)?.name ?? null);
         setError(null);
       })
       .catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Could not load deployment"))
@@ -124,6 +123,12 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
     }
   }
 
+  async function handleCopyLogs() {
+    const text = logs.map((log) => `[${log.stream}] ${log.line}`).join("\n");
+    await navigator.clipboard?.writeText(text);
+    setNotice("Logs copied");
+  }
+
   if (isLoading) {
     return <p className="muted">Loading deployment...</p>;
   }
@@ -140,7 +145,8 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
         </button>
         <div className="detail-header">
           <div>
-            <h2>{deployment.kind === "rollback" ? "Rollback" : "Deployment"}</h2>
+            <p className="eyebrow">Release</p>
+            <h2>{appName ?? "Deployment"} {deployment.kind === "rollback" ? "rollback" : "deploy"}</h2>
             <p>{deployment.id}</p>
           </div>
           {displayStatus ? <StatusBadge label={displayStatus} tone={deploymentStatusTone(displayStatus)} /> : null}
@@ -149,11 +155,13 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
         {error ? <p className="form-error">{error}</p> : null}
         {stream.error ? <p className="form-error">{stream.error}</p> : null}
         <dl className="detail-list">
-          <div><dt>Started</dt><dd>{formatDate(deployment.started_at)}</dd></div>
-          <div><dt>Finished</dt><dd>{formatDate(deployment.finished_at)}</dd></div>
-          <div><dt>Duration</dt><dd>{deployment.duration_seconds === null ? "Not finished" : `${deployment.duration_seconds}s`}</dd></div>
-          <div><dt>Commit</dt><dd>{deployment.commit_sha ?? "Unknown"}</dd></div>
-          <div><dt>Previous commit</dt><dd>{deployment.previous_commit_sha ?? "Unknown"}</dd></div>
+          <div><dt>App</dt><dd>{appName ?? deployment.app_id}</dd></div>
+          <div><dt>Kind</dt><dd>{humanizeToken(deployment.kind)}</dd></div>
+          <div><dt>Started</dt><dd>{formatDateTime(deployment.started_at)}</dd></div>
+          <div><dt>Finished</dt><dd>{formatDateTime(deployment.finished_at)}</dd></div>
+          <div><dt>Duration</dt><dd>{formatDuration(deployment.duration_seconds)}</dd></div>
+          <div><dt>Commit</dt><dd><CodeValue value={deployment.commit_sha} /></dd></div>
+          <div><dt>Previous commit</dt><dd><CodeValue value={deployment.previous_commit_sha} /></dd></div>
           <div><dt>Exit code</dt><dd>{deployment.exit_code ?? "Not finished"}</dd></div>
           <div><dt>Error</dt><dd>{deploymentErrorSummary(deployment)}</dd></div>
         </dl>
@@ -188,9 +196,14 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
       <section className="log-panel" aria-labelledby="deployment-logs-title">
         <div className="section-heading">
           <h2 id="deployment-logs-title">Logs</h2>
-          <button className="secondary-button" type="button" onClick={() => setAutoScroll((current) => !current)}>
-            {autoScroll ? "Pause scroll" : "Resume scroll"}
-          </button>
+          <div className="row-actions">
+            <button className="secondary-button" type="button" onClick={() => void handleCopyLogs()} disabled={logs.length === 0}>
+              Copy logs
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setAutoScroll((current) => !current)}>
+              {autoScroll ? "Pause scroll" : "Resume scroll"}
+            </button>
+          </div>
         </div>
         <DeploymentLogViewer logs={logs} />
       </section>
@@ -215,6 +228,7 @@ export function DeploymentTable({
         <span>Kind</span>
         <span>Commit</span>
         <span>Started</span>
+        <span>Duration</span>
         <span>Action</span>
       </div>
       {deployments.map((deployment) => (
@@ -227,9 +241,10 @@ export function DeploymentTable({
         >
           <span>{appNames.get(deployment.app_id) ?? deployment.app_id}</span>
           <StatusBadge label={deployment.status} tone={deploymentStatusTone(deployment.status)} />
-          <span>{deployment.kind}</span>
-          <span>{deployment.commit_sha ?? "Unknown"}</span>
-          <span>{formatDate(deployment.started_at)}</span>
+          <span>{humanizeToken(deployment.kind)}</span>
+          <span title={deployment.commit_sha ?? undefined}>{shortSha(deployment.commit_sha)}</span>
+          <span>{formatDateTime(deployment.started_at)}</span>
+          <span>{formatDuration(deployment.duration_seconds)}</span>
           <span className="row-link">View details</span>
         </button>
       ))}
@@ -269,10 +284,6 @@ async function loadDeployments(token: string) {
     return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
   });
   return { loadedApps, loadedDeployments };
-}
-
-function formatDate(value: string | null) {
-  return value ? new Date(value).toLocaleString() : "Not available";
 }
 
 function deploymentErrorSummary(deployment: DeploymentDetail) {

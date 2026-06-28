@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { getDashboard } from "../api/dashboard";
-import { StatusBadge } from "../components/common";
+import { CodeValue, EmptyState, formatDateTime, humanizeToken, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 import { navigateTo } from "../routes";
 import type { Dashboard } from "../types/dashboard";
@@ -33,27 +33,38 @@ export function DashboardPage() {
     return <p className="form-error">{error ?? "Dashboard unavailable"}</p>;
   }
 
+  const appNames = new Map(dashboard.recent_apps.map((app) => [app.id, app.name]));
+
   return (
     <section className="dashboard-layout">
       <section className="workspace-grid">
         <SummaryCard
           label="Latest deployment"
-          value={dashboard.summary.latest_deployment_status ?? "None"}
-          helper={dashboard.summary.latest_deployment_status ? "Most recent result" : "No deployments yet"}
+          value={dashboard.summary.latest_deployment_status ? humanizeToken(dashboard.summary.latest_deployment_status) : "None"}
+          helper={dashboard.summary.latest_deployment_status ? "Most recent deployment result" : "No deployments yet"}
           tone={dashboard.summary.latest_deployment_status ? deploymentStatusTone(dashboard.summary.latest_deployment_status) : "neutral"}
         />
-        <SummaryCard label="Servers" value={String(dashboard.summary.total_servers)} helper={`${dashboard.summary.connected_servers} connected`} />
-        <SummaryCard label="Apps" value={String(dashboard.summary.total_apps)} helper={`${dashboard.summary.deployed_apps} deployed`} />
+        <SummaryCard
+          label="Connected servers"
+          value={`${dashboard.summary.connected_servers}/${dashboard.summary.total_servers}`}
+          helper="Infrastructure reachable by DeployDock"
+          tone={dashboard.summary.total_servers > 0 && dashboard.summary.connected_servers === dashboard.summary.total_servers ? "success" : "neutral"}
+        />
+        <SummaryCard label="Apps deployed" value={`${dashboard.summary.deployed_apps}/${dashboard.summary.total_apps}`} helper="Registered server apps" />
         <SummaryCard label="Recent failures" value={String(dashboard.summary.recent_failures)} helper="in last 7 days" tone={dashboard.summary.recent_failures > 0 ? "danger" : "success"} />
       </section>
 
       <section className="dashboard-panels">
-        <DashboardPanel title="Recent deployments" emptyText="Deploy from an app detail page to populate release history.">
+        <DashboardPanel
+          title="Recent deployments"
+          action={<button className="link-button" type="button" onClick={() => navigateTo("/deployments")}>View all deployments</button>}
+          emptyText="No deployments yet. Trigger your first deployment from an app page."
+        >
           {dashboard.recent_deployments.map((deployment) => (
             <button className="activity-row" key={deployment.id} type="button" onClick={() => navigateTo(`/deployments/${deployment.id}`)}>
               <div>
-                <strong>{deployment.kind}</strong>
-                <span>{deployment.commit_sha ?? "Unknown commit"} · {formatDate(deployment.created_at)}</span>
+                <strong>{appNames.get(deployment.app_id) ?? "Unknown app"}</strong>
+                <span>{humanizeToken(deployment.kind)} · <CodeValue value={deployment.commit_sha} /> · {formatDateTime(deployment.created_at)}</span>
               </div>
               <StatusBadge label={deployment.status} tone={deploymentStatusTone(deployment.status)} />
               <span className="row-link">View details</span>
@@ -61,18 +72,18 @@ export function DashboardPage() {
           ))}
         </DashboardPanel>
 
-        <DashboardPanel title="Recent audit events" emptyText="Important actions such as service restarts and rollbacks will appear here.">
+        <DashboardPanel title="Recent audit events" emptyText="No audit events yet. Deploys, rollbacks, app updates, and service restarts will appear here.">
           {dashboard.recent_audit_logs.map((event) => (
             <article className="activity-row static" key={event.id}>
               <div>
-                <strong>{event.action}</strong>
-                <span>{event.entity_type} · {formatDate(event.created_at)}</span>
+                <strong>{humanizeToken(event.action)}</strong>
+                <span>{event.action} · {event.entity_type} · {formatDateTime(event.created_at)}</span>
               </div>
             </article>
           ))}
         </DashboardPanel>
 
-        <DashboardPanel title="Servers" emptyText="Add a server to begin connecting DeployDock to your infrastructure.">
+        <DashboardPanel title="Servers" emptyText="No servers yet. Connect your first VPS to start deploying.">
           {dashboard.recent_servers.map((server) => (
             <button className="activity-row" key={server.id} type="button" onClick={() => navigateTo("/servers")}>
               <div>
@@ -84,12 +95,12 @@ export function DashboardPage() {
           ))}
         </DashboardPanel>
 
-        <DashboardPanel title="Apps" emptyText="Register an app after adding a server.">
+        <DashboardPanel title="Apps" emptyText="No apps yet. Register an existing app path on one of your servers.">
           {dashboard.recent_apps.map((app) => (
             <button className="activity-row" key={app.id} type="button" onClick={() => navigateTo(`/apps/${app.id}`)}>
               <div>
                 <strong>{app.name}</strong>
-                <span>{app.service_name ?? "No service"} · {app.last_successful_commit ?? "Not deployed"}</span>
+                <span>{app.service_name ?? "No service"} · <CodeValue value={app.last_successful_commit} /></span>
               </div>
             </button>
           ))}
@@ -119,13 +130,26 @@ function SummaryCard({
   );
 }
 
-function DashboardPanel({ title, emptyText, children }: { title: string; emptyText: string; children: ReactNode }) {
+function DashboardPanel({
+  title,
+  emptyText,
+  action,
+  children,
+}: {
+  title: string;
+  emptyText: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children);
 
   return (
     <section className="dashboard-panel">
-      <h2>{title}</h2>
-      {hasChildren ? <div className="activity-list">{children}</div> : <p className="muted">{emptyText}</p>}
+      <div className="panel-heading">
+        <h2>{title}</h2>
+        {action}
+      </div>
+      {hasChildren ? <div className="activity-list">{children}</div> : <EmptyState title={title === "Recent deployments" ? "No deployments yet" : "Nothing to show yet"} body={emptyText} />}
     </section>
   );
 }
@@ -145,8 +169,4 @@ function DashboardSkeleton({ userLabel }: { userLabel: string }) {
       </section>
     </section>
   );
-}
-
-function formatDate(value: string) {
-  return new Date(value).toLocaleString();
 }
