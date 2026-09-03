@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import create_access_token, hash_password, needs_rehash, verify_password
 from app.models import User
 
 
@@ -41,6 +41,13 @@ async def authenticate_user(session: AsyncSession, *, email: str, password: str)
         return None
     if not verify_password(password, user.hashed_password):
         return None
+
+    # Transparently upgrade hashes written by an older algorithm or weaker parameters.
+    if needs_rehash(user.hashed_password):
+        user.hashed_password = hash_password(password)
+        await session.commit()
+        await session.refresh(user)
+
     return user
 
 

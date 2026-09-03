@@ -1,6 +1,5 @@
 import enum
 import uuid
-
 from datetime import datetime
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text
@@ -42,6 +41,11 @@ class Server(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     encrypted_private_key: Mapped[str] = mapped_column(Text, nullable=False)
     public_ssh_key: Mapped[str | None] = mapped_column(Text)
+    # Pinned SSH host key of the target server, stored as "<algorithm> <base64>".
+    # Every connection verifies against this; a mismatch aborts the connection.
+    known_host_key: Mapped[str | None] = mapped_column(Text)
+    known_host_key_fingerprint: Mapped[str | None] = mapped_column(String(255))
+    known_host_key_pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     private_key_fingerprint: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[ServerStatus] = mapped_column(
         Enum(ServerStatus, native_enum=False),

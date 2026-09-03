@@ -39,6 +39,8 @@ def test_core_tables_are_registered() -> None:
         "deployments",
         "deployment_logs",
         "audit_logs",
+        "agents",
+        "agent_registration_tokens",
     }
 
 

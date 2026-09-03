@@ -18,7 +18,27 @@ class Settings(BaseSettings):
     secret_key: str = Field(default="change-me", alias="SECRET_KEY")
     access_token_expire_minutes: int = Field(default=60, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     encryption_key: str = Field(default="change-me-32-byte-key", alias="ENCRYPTION_KEY")
+    encryption_key_id: str = Field(default="v1", alias="ENCRYPTION_KEY_ID")
+    encryption_keys_retired: str = Field(default="", alias="ENCRYPTION_KEYS_RETIRED")
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS")
+
+    redis_url: str | None = Field(default=None, alias="REDIS_URL")
+    login_max_attempts: int = Field(default=5, alias="LOGIN_MAX_ATTEMPTS")
+    login_window_seconds: int = Field(default=60, alias="LOGIN_WINDOW_SECONDS")
+
+    deploy_timeout_seconds: int = Field(default=900, alias="DEPLOY_TIMEOUT_SECONDS")
+    rollback_timeout_seconds: int = Field(default=300, alias="ROLLBACK_TIMEOUT_SECONDS")
+    orphan_deployment_timeout_seconds: int = Field(
+        default=3600,
+        alias="ORPHAN_DEPLOYMENT_TIMEOUT_SECONDS",
+    )
+
+    heartbeat_interval_seconds: int = Field(default=30, alias="HEARTBEAT_INTERVAL_SECONDS")
+    agent_registration_token_ttl_seconds: int = Field(
+        default=900,
+        alias="AGENT_REGISTRATION_TOKEN_TTL_SECONDS",
+    )
+    agent_offline_after_seconds: int = Field(default=90, alias="AGENT_OFFLINE_AFTER_SECONDS")
 
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", env_file_encoding="utf-8")
 
@@ -27,22 +47,39 @@ class Settings(BaseSettings):
     def normalize_app_env(cls, value: str) -> str:
         return value.strip().lower()
 
+    @field_validator("encryption_key_id")
+    @classmethod
+    def validate_encryption_key_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("ENCRYPTION_KEY_ID must not be empty")
+        if ":" in value:
+            raise ValueError("ENCRYPTION_KEY_ID must not contain ':'")
+        return value
+
     @model_validator(mode="after")
     def validate_production_settings(self) -> "Settings":
+        # Parsed eagerly so a malformed retired-key list fails at boot, not at decrypt time.
+        self.retired_encryption_keys  # noqa: B018
+
         if not self.is_production:
             return self
 
         if self.secret_key == "change-me" or len(self.secret_key) < 32:
             raise ValueError("SECRET_KEY must be changed to a strong value in production")
 
-        if self.encryption_key in {"change-me", "change-me-32-byte-key"} or len(self.encryption_key) < 32:
+        weak_encryption_keys = {"change-me", "change-me-32-byte-key"}
+        if self.encryption_key in weak_encryption_keys or len(self.encryption_key) < 32:
             raise ValueError("ENCRYPTION_KEY must be changed to a stable strong value in production")
 
         if any(origin == "*" for origin in self.cors_origin_list):
             raise ValueError("CORS_ORIGINS must not include '*' in production")
 
         local_origins = ("localhost", "127.0.0.1", "0.0.0.0")
-        if any(any(local_origin in origin for local_origin in local_origins) for origin in self.cors_origin_list):
+        if any(
+            any(local_origin in origin for local_origin in local_origins)
+            for origin in self.cors_origin_list
+        ):
             raise ValueError("CORS_ORIGINS must point at the production frontend in production")
 
         return self
@@ -54,6 +91,25 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def retired_encryption_keys(self) -> dict[str, str]:
+        """Previously active encryption keys, still accepted for decryption.
+
+        Format: ``ENCRYPTION_KEYS_RETIRED=v0:old-secret,legacy:older-secret``
+        """
+        retired: dict[str, str] = {}
+        for entry in self.encryption_keys_retired.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            key_id, separator, secret = entry.partition(":")
+            if not separator or not key_id.strip() or not secret.strip():
+                raise ValueError(
+                    "ENCRYPTION_KEYS_RETIRED entries must look like 'key_id:secret', comma-separated"
+                )
+            retired[key_id.strip()] = secret.strip()
+        return retired
 
 
 @lru_cache

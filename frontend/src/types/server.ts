@@ -10,6 +10,8 @@ export type Server = {
   auth_type: "ssh_key";
   public_ssh_key: string | null;
   private_key_fingerprint: string | null;
+  known_host_key_fingerprint: string | null;
+  known_host_key_pinned_at: string | null;
   status: ServerStatus;
   last_connection_check_at: string | null;
   last_connection_error: string | null;
@@ -28,5 +30,13 @@ export type ServerPayload = {
 export type ServerConnectionTest = {
   success: boolean;
   status: ServerStatus;
+  message: string;
+  host_key_fingerprint: string | null;
+};
+
+export type ServerHostKey = {
+  fingerprint: string;
+  algorithm: string;
+  previous_fingerprint: string | null;
   message: string;
 };

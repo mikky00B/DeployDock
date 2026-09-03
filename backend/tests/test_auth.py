@@ -3,8 +3,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core import rate_limit
 from app.core.config import get_settings
-from app.core.rate_limit import login_rate_limiter
+from app.core.rate_limit import InMemoryRateLimitBackend, LoginRateLimiter
 from app.db.base import Base
 from app.db.session import get_db_session
 from app.main import app
@@ -28,12 +29,15 @@ async def auth_client(monkeypatch):
             yield session
 
     app.dependency_overrides[get_db_session] = override_get_db_session
+    # Isolate the shared limiter so attempts do not leak between tests.
+    rate_limit.login_rate_limiter = LoginRateLimiter(
+        backend=InMemoryRateLimitBackend(window_seconds=60)
+    )
 
     with TestClient(app) as client:
         yield client, async_session
 
     app.dependency_overrides.clear()
-    login_rate_limiter._attempts.clear()
     get_settings.cache_clear()
     await engine.dispose()
 
@@ -83,7 +87,7 @@ async def test_register_hashes_password(auth_client) -> None:
         user = result.scalar_one()
 
     assert user.hashed_password != "strong-password"
-    assert user.hashed_password.startswith("pbkdf2_sha256$")
+    assert user.hashed_password.startswith("$argon2")
 
 
 def test_register_rejects_duplicate_email(auth_client) -> None:

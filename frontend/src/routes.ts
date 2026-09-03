@@ -1,4 +1,5 @@
 export type AppRoute =
+  | "/"
   | "/login"
   | "/register"
   | "/dashboard"
@@ -13,7 +14,7 @@ export type RouteState = {
   deploymentId?: string;
 };
 
-const routes: AppRoute[] = ["/login", "/register", "/dashboard", "/servers", "/apps", "/deployments"];
+const routes: AppRoute[] = ["/", "/login", "/register", "/dashboard", "/servers", "/apps", "/deployments"];
 
 export function getCurrentRoute(): RouteState {
   const pathname = window.location.pathname;

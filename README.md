@@ -12,15 +12,6 @@ GitHub/repository -> DeployDock -> VPS/server -> existing systemd/Docker/nginx a
 
 It reaches target servers over SSH on demand, runs your configured commands, streams output, saves history, and closes the connection. It does not try to own your runtime, reverse proxy, SSL setup, app structure, or secrets by default.
 
-DeployDock currently includes:
-
-- FastAPI backend with liveness and database readiness endpoints.
-- Async SQLAlchemy database models and Alembic migrations.
-- JWT authentication.
-- Server, app, deployment, log streaming, service control, rollback, audit, and dashboard APIs.
-- React + Vite dashboard UI for server onboarding, app registration, deployments, and service operations.
-- Bootstrap plan generators for Django, FastAPI, Go services, and static React/Vite sites.
-
 DeployDock is not a replacement for Vercel, Kubernetes, Docker Swarm, Coolify, Dokploy, CapRover, or Dokku. It is for existing server setups where you already deploy with commands such as:
 
 ```bash
@@ -30,203 +21,128 @@ alembic upgrade head
 sudo systemctl restart app-name
 ```
 
-## Project Structure
+## What's included
+
+- FastAPI backend with liveness and database readiness endpoints.
+- Async SQLAlchemy models and Alembic migrations.
+- JWT authentication (PyJWT, HS256) with Argon2id password hashing.
+- SSH host key pinning: every connection is verified against a key you accepted.
+- Server, app, deployment, log streaming, service control, rollback, audit, and dashboard APIs.
+- React + Vite dashboard for server onboarding, app registration, deployments, and service operations.
+- Bootstrap plan generators for Django, FastAPI, Go services, and static React/Vite sites.
+- SSH private keys encrypted at rest, with key ids so the encryption key can be rotated.
+- At most one active deployment per app, enforced in the database.
+
+## Documentation
+
+| Guide | What it covers |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Local setup, Docker Compose, first login |
+| [Configuration](docs/configuration.md) | Every environment variable, production guardrails |
+| [Server onboarding](docs/server-onboarding.md) | Deploy users, generated keys, host key pinning, sudoers |
+| [Deployments](docs/deployments.md) | Deploy commands, concurrency, log streaming, rollback |
+| [Security model](docs/security.md) | What DeployDock protects, what it does not, and why |
+| [Operations](docs/operations.md) | Running in production, workers, key rotation, backups |
+| [API reference](docs/api.md) | Endpoints, status codes, and error shapes |
+| [Architecture](docs/architecture.md) | Components, request flow, and design decisions |
+| [Contributing](docs/contributing.md) | Tests, linting, migrations, CI |
+
+## Quick start with Docker Compose
+
+```bash
+cp backend/.env.example backend/.env
+# Generate real secrets:
+python -c "import secrets; print('SECRET_KEY=' + secrets.token_urlsafe(48))"
+python -c "import secrets; print('ENCRYPTION_KEY=' + secrets.token_urlsafe(48))"
+# Paste both into backend/.env, then:
+docker compose up --build
+```
+
+- Dashboard: <http://127.0.0.1:5173>
+- API: <http://127.0.0.1:8000>
+- API docs (FastAPI): <http://127.0.0.1:8000/docs>
+
+Migrations run automatically before the API starts.
+
+## Quick start without Docker
+
+Requires Python 3.11+, Node 20+, and a PostgreSQL database.
+
+```bash
+# Backend
+cd backend
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+cp .env.example .env               # then set SECRET_KEY and ENCRYPTION_KEY
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+```bash
+# Frontend, in a second terminal
+cd frontend
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Health endpoints:
+
+```text
+GET http://127.0.0.1:8000/health        -> {"status":"ok","service":"deploydock-api"}
+GET http://127.0.0.1:8000/health/ready  -> {"status":"ok","database":"reachable"}
+```
+
+See [docs/getting-started.md](docs/getting-started.md) for the full walkthrough, including your first server and first deploy.
+
+## Project structure
 
 ```text
 backend/
   app/
-  alembic/
-  tests/
+    api/v1/        HTTP routes
+    core/          config, security, encryption, rate limiting, logging
+    db/            engine and session
+    models/        SQLAlchemy models
+    schemas/       Pydantic request/response models
+    services/      business logic (servers, apps, deployments, SSH)
+    workers/       the deployment runner
+  alembic/         migrations
+  tests/           pytest suite
+docs/              documentation
 frontend/
   src/
+    api/           typed API client
+    hooks/         auth and deployment log streaming
+    lib/bootstrap/ setup-plan generators per stack
+    pages/         dashboard, servers, apps, deployments
 ```
 
-## Backend Setup
+## Running the checks
 
 ```bash
-python -m venv .venv
-cd backend
-..\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-copy .env.example .env
-..\.venv\Scripts\uvicorn.exe app.main:app --reload
+cd backend && ruff check . && pytest -q
+cd frontend && npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-The backend liveness endpoint is available at:
+CI runs the same checks on every push and pull request, plus an Alembic
+up/down/up cycle against a real PostgreSQL service. See
+[docs/contributing.md](docs/contributing.md).
 
-```text
-GET http://127.0.0.1:8000/health
-```
+## Security posture in one minute
 
-Expected response:
+- SSH host keys are pinned on first connection and verified on every connection after that. A mismatch aborts the connection instead of exposing your private key. Re-pinning is a deliberate, audited action.
+- SSH private keys are encrypted at rest with Fernet, tagged with a key id so `ENCRYPTION_KEY` can be rotated.
+- Passwords use Argon2id. Older pbkdf2 hashes are upgraded transparently on the next successful login.
+- Access tokens are JWTs with a pinned algorithm, `iat`/`nbf`/`exp`/`jti`, and no server-side revocation list — keep `ACCESS_TOKEN_EXPIRE_MINUTES` short.
+- `deploy_command` is arbitrary shell run on the target server. Anyone who can edit an app effectively has shell on that box. This is the product working as intended; treat DeployDock accounts accordingly.
 
-```json
-{
-  "status": "ok",
-  "service": "deploydock-api"
-}
-```
+Full detail, including the known gaps, is in [docs/security.md](docs/security.md).
 
-The readiness endpoint checks database connectivity:
+## Roadmap
 
-```text
-GET http://127.0.0.1:8000/health/ready
-```
-
-Expected response:
-
-```json
-{
-  "status": "ok",
-  "database": "reachable"
-}
-```
-
-## Backend Tests
-
-```bash
-cd backend
-pytest
-```
-
-## Database and Alembic
-
-DeployDock uses async SQLAlchemy models and Alembic migrations for users, servers, apps, deployments, deployment logs, and audit logs.
-
-```bash
-cd backend
-alembic upgrade head
-```
-
-## Frontend Setup
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The frontend defaults to:
-
-```text
-http://127.0.0.1:5173
-```
-
-## Frontend Build
-
-```bash
-cd frontend
-npm run build
-```
-
-## App Bootstrap Planner
-
-The Apps page supports two app onboarding modes:
-
-- Register an existing server app by entering its repository, path, deploy command, restart command, and healthcheck URL.
-- Generate a setup plan for a new Django, FastAPI, Go, or static React/Vite app. The generated plan includes server commands, environment examples, systemd units, Nginx snippets, sudoers guidance, and a DeployDock app payload.
-
-Bootstrap plans are copied into your own server workflow; DeployDock still runs only the deploy and service commands you save for the app.
-
-## Environment Variables
-
-The backend loads configuration from `backend/.env` through `backend/app/core/config.py`.
-
-The frontend reads `VITE_API_BASE_URL` from `frontend/.env` through Vite's `import.meta.env`.
-
-Backend example values live in `backend/.env.example`.
-
-Frontend example values live in `frontend/.env.example`.
-
-Backend variables:
-
-```text
-APP_ENV=development
-API_HOST=127.0.0.1
-API_PORT=8000
-DATABASE_URL=postgresql+asyncpg://deploydock:deploydock@localhost:5432/deploydock
-SECRET_KEY=change-me
-ACCESS_TOKEN_EXPIRE_MINUTES=60
-ENCRYPTION_KEY=change-me-32-byte-key
-CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-```
-
-Frontend variables:
-
-```text
-VITE_API_BASE_URL=http://127.0.0.1:8000
-```
-
-Production guardrails:
-
-- `APP_ENV=production` rejects weak default `SECRET_KEY` values.
-- `APP_ENV=production` rejects weak/default `ENCRYPTION_KEY` values.
-- `APP_ENV=production` rejects local or wildcard `CORS_ORIGINS`.
-- Keep `ENCRYPTION_KEY` stable. Changing it makes stored SSH keys unreadable.
-
-## Recommended Server Onboarding
-
-Use one dedicated non-root deploy user per target server. Do not SSH as root.
-
-Recommended flow:
-
-1. Create or choose a restricted deploy user on the target server.
-2. Add the server in DeployDock with name, host, SSH port, and deploy username.
-3. Leave the private key field blank.
-4. DeployDock generates a unique ed25519 keypair for that server.
-5. Copy the generated public key into the deploy user's `authorized_keys`.
-6. Click Test connection.
-
-Example target server setup:
-
-```bash
-sudo adduser --disabled-password --gecos "" deploy
-sudo mkdir -p /home/deploy/.ssh
-sudo chown deploy:deploy /home/deploy/.ssh
-sudo chmod 700 /home/deploy/.ssh
-```
-
-After adding the server in DeployDock, copy the generated public key:
-
-```bash
-echo '<generated-public-key>' | sudo tee -a /home/deploy/.ssh/authorized_keys
-sudo chown deploy:deploy /home/deploy/.ssh/authorized_keys
-sudo chmod 600 /home/deploy/.ssh/authorized_keys
-```
-
-Grant narrow sudo permissions only for commands the app needs. Example:
-
-```text
-deploy ALL=(root) NOPASSWD: /bin/systemctl restart watchdog
-deploy ALL=(root) NOPASSWD: /bin/systemctl reload nginx
-deploy ALL=(root) NOPASSWD: /usr/sbin/nginx -t
-```
-
-Private-key upload remains available as an advanced/manual option, but generated per-server keys are the recommended default. Keys are never reused across servers.
-
-## Secrets and Environment Files
-
-DeployDock v1 is not a full secrets manager.
-
-Default recommendation:
-
-- Keep production `.env` files on the target server.
-- Use DeployDock to orchestrate deployments, restarts, logs, status checks, and rollback.
-- Do not store app secrets in DeployDock unless a future optional secrets feature is explicitly added and reviewed.
-
-## Deployment Commands
-
-Deploy commands are configured in DeployDock for v1. This keeps the MVP compatible with existing app layouts.
-
-Example:
-
-```bash
-set -e
-git pull origin main
-source .venv/bin/activate
-pip install -r requirements.txt
-alembic upgrade head
-sudo systemctl restart watchdog
-```
-
-Future roadmap: an optional `deploydock.yml` or `deploydock.yaml` manifest may be added later, but it is not required for v1.
-
+- Move the deployment runner out of the API process into a dedicated worker.
+- Optional `deploydock.yml` manifest instead of dashboard-configured commands.
+- Multi-user teams with per-app permissions.
+- Optional secrets management, if it can be done without becoming a secrets manager.

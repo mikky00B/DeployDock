@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass
 
 import pytest
@@ -9,10 +10,9 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_db_session, get_sessionmaker
 from app.main import app
-from app.models import AuditLog
+from app.models import AuditLog, Deployment, User
 from app.models.deployment import DeploymentKind, DeploymentStatus
 from app.services.ssh_service import SSHCommandResult, get_ssh_service
-
 
 TEST_PRIVATE_KEY = """-----BEGIN OPENSSH PRIVATE KEY-----
 test-private-key
@@ -37,6 +37,7 @@ class SuccessfulDeploymentSSHService:
         username: str,
         private_key: str,
         command: str,
+        known_host_key: str | None = None,
         timeout_seconds: int = 15,
     ) -> SSHCommandResult:
         self.calls.append(SSHCall(command=command, private_key=private_key))
@@ -344,3 +345,73 @@ def test_deploy_route_rejects_unauthenticated_requests(deployment_client) -> Non
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Not authenticated"
+
+
+async def test_deploy_is_rejected_while_another_deployment_is_active(deployment_client) -> None:
+    """A second deploy must be refused while one is still pending or running.
+
+    The active deployment is seeded directly: TestClient runs FastAPI background
+    tasks to completion before returning, so a real in-flight deploy cannot be
+    observed mid-flight through the client.
+    """
+    client = deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    app_record = create_app(client, headers)
+
+    async with client.async_session() as session:
+        owner = (await session.execute(select(User))).scalars().first()
+        session.add(
+            Deployment(
+                owner_id=owner.id,
+                app_id=uuid.UUID(app_record["id"]),
+                server_id=uuid.UUID(app_record["server_id"]),
+                status=DeploymentStatus.running,
+                kind=DeploymentKind.deploy,
+            )
+        )
+        await session.commit()
+
+    response = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers)
+
+    assert response.status_code == 409
+    assert "already running" in response.json()["detail"]
+
+
+async def test_rollback_is_rejected_while_another_deployment_is_active(deployment_client) -> None:
+    client = deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    app_record = create_app(client, headers)
+    app.dependency_overrides[get_ssh_service] = lambda: SuccessfulDeploymentSSHService()
+
+    finished = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers).json()
+
+    async with client.async_session() as session:
+        owner = (await session.execute(select(User))).scalars().first()
+        session.add(
+            Deployment(
+                owner_id=owner.id,
+                app_id=uuid.UUID(app_record["id"]),
+                server_id=uuid.UUID(app_record["server_id"]),
+                status=DeploymentStatus.pending,
+                kind=DeploymentKind.deploy,
+            )
+        )
+        await session.commit()
+
+    response = client.post(f"/api/v1/deployments/{finished['id']}/rollback", headers=headers)
+
+    assert response.status_code == 409
+    assert "already pending" in response.json()["detail"]
+
+
+def test_deploy_is_allowed_again_after_the_previous_one_finishes(deployment_client) -> None:
+    client = deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    app_record = create_app(client, headers)
+    app.dependency_overrides[get_ssh_service] = lambda: SuccessfulDeploymentSSHService()
+
+    first = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers)
+    second = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers)
+
+    assert first.status_code == 202
+    assert second.status_code == 202

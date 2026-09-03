@@ -23,7 +23,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     });
   } catch (error) {
     if (error instanceof TypeError) {
-      throw new Error(`Could not reach the API at ${baseUrl}. Check that the backend is running and CORS allows this frontend.`);
+      throw new Error(
+        `Could not reach the API at ${baseUrl}. Check that the backend is running and CORS allows this frontend.`,
+        { cause: error },
+      );
     }
     throw error;
   }
