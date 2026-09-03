@@ -26,3 +26,6 @@ Thumbs.db
 # Local working docs (not for the repo)
 SPEC_PROGRESS.md
 DeployDock_v2_Master_Spec.md
+
+# Local design handoff assets
+design_handoff_deploydock_landing/
