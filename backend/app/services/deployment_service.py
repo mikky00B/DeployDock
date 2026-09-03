@@ -1,15 +1,50 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import Deployment, DeploymentLog, User
 from app.models.deployment import DeploymentKind, DeploymentStatus
 from app.schemas.deployment_log import DeploymentLogRead
-from app.services.audit_service import create_audit_log
 from app.services.app_service import get_app_for_user
+from app.services.audit_service import create_audit_log
+
+ACTIVE_DEPLOYMENT_STATUSES = (DeploymentStatus.pending, DeploymentStatus.running)
+
+
+async def get_active_deployment(session: AsyncSession, *, app_id: uuid.UUID) -> Deployment | None:
+    """Return the app's in-flight deployment, if any.
+
+    Checked across all owners of the app, not just the caller: two concurrent
+    deployments would race on the same checkout on the target server regardless
+    of who triggered them.
+    """
+    result = await session.execute(
+        select(Deployment)
+        .where(
+            Deployment.app_id == app_id,
+            Deployment.status.in_(ACTIVE_DEPLOYMENT_STATUSES),
+        )
+        .order_by(Deployment.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _guard_against_concurrent_deployment(session: AsyncSession, *, app_id: uuid.UUID) -> None:
+    active = await get_active_deployment(session, app_id=app_id)
+    if active is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Deployment {active.id} is already {active.status.value} for this app. "
+                "Wait for it to finish before starting another."
+            ),
+        )
 
 
 async def create_deployment(
@@ -19,6 +54,7 @@ async def create_deployment(
     current_user: User,
 ) -> Deployment:
     app = await get_app_for_user(session, app_id=app_id, current_user=current_user)
+    await _guard_against_concurrent_deployment(session, app_id=app.id)
     deployment = Deployment(
         owner_id=current_user.id,
         app_id=app.id,
@@ -28,7 +64,16 @@ async def create_deployment(
         triggered_by=current_user.email,
     )
     session.add(deployment)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        # The partial unique index on (app_id) for non-terminal deployments is the
+        # authoritative guard: it also catches races between two API workers.
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another deployment for this app started at the same time. Try again shortly.",
+        ) from exc
     await create_audit_log(
         session,
         current_user=current_user,
@@ -104,6 +149,9 @@ async def create_rollback_deployment(
         deployment_id=deployment_id,
         current_user=current_user,
     )
+    # Checked before anything else: a rollback while a deploy is in flight would
+    # fight over the same checkout.
+    await _guard_against_concurrent_deployment(session, app_id=source_deployment.app_id)
     target_commit = await find_previous_successful_commit(
         session,
         source_deployment=source_deployment,
@@ -133,7 +181,14 @@ async def create_rollback_deployment(
         triggered_by=current_user.email,
     )
     session.add(rollback_deployment)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another deployment for this app started at the same time. Try again shortly.",
+        ) from exc
     await create_audit_log(
         session,
         current_user=current_user,
@@ -171,3 +226,41 @@ async def find_previous_successful_commit(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def fail_orphaned_deployments(
+    session: AsyncSession,
+    *,
+    older_than_seconds: int,
+) -> int:
+    """Mark deployments stuck in pending/running as failed.
+
+    A deploy runs inside the API process, so a restart, crash, or worker recycle
+    mid-deploy leaves the row non-terminal forever - blocking every later deploy of
+    that app via the concurrency guard. This sweep runs at startup and reclaims them.
+    Returns the number of rows reclaimed.
+    """
+    cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+    result = await session.execute(
+        select(Deployment).where(
+            Deployment.status.in_(ACTIVE_DEPLOYMENT_STATUSES),
+            Deployment.created_at <= cutoff,
+        )
+    )
+    orphaned = list(result.scalars().all())
+
+    for deployment in orphaned:
+        deployment.status = DeploymentStatus.failed
+        deployment.error_message = (
+            "Deployment was interrupted (the API process stopped while it was running) "
+            "and has been marked failed automatically."
+        )
+        deployment.finished_at = datetime.now(UTC)
+        if deployment.started_at is not None:
+            deployment.duration_seconds = max(
+                0, int((deployment.finished_at - deployment.started_at).total_seconds())
+            )
+
+    if orphaned:
+        await session.commit()
+    return len(orphaned)

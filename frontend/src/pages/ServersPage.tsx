@@ -1,6 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react";
 
-import { createServer, deleteServer, getServer, listServers, testServerConnection, updateServer } from "../api/servers";
+import {
+  createServer,
+  deleteServer,
+  getServer,
+  listServers,
+  repinServerHostKey,
+  testServerConnection,
+  updateServer,
+} from "../api/servers";
 import { EmptyState, formatDateTime, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 import { navigateTo } from "../routes";
@@ -113,6 +121,9 @@ export function ServersPage() {
                   {server.name}
                 </button>
                 <p>{server.username}@{server.host}:{server.port}</p>
+                {server.known_host_key_fingerprint ? null : (
+                  <p className="field-helper">Host key not pinned - test the connection to pin it.</p>
+                )}
               </div>
               <StatusBadge label={server.status} tone={serverStatusTone(server.status)} />
               <div className="row-actions">
@@ -163,6 +174,7 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isTesting, setIsTesting] = useState(false);
+  const [isRepinning, setIsRepinning] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -208,14 +220,44 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
     setError(null);
     setIsTesting(true);
     try {
+      const wasUnpinned = server.known_host_key_fingerprint === null;
       const result = await testServerConnection(token, server.id);
       const refreshed = await getServer(token, server.id);
       setServer(refreshed);
-      setNotice(result.message);
+      if (result.success && wasUnpinned && result.host_key_fingerprint) {
+        setNotice(
+          `${result.message}. Host key pinned: ${result.host_key_fingerprint} - verify this against the server itself.`,
+        );
+      } else if (result.success) {
+        setNotice(result.message);
+      } else {
+        setError(result.message);
+      }
     } catch (testError) {
       setError(testError instanceof Error ? testError.message : "Could not test connection");
     } finally {
       setIsTesting(false);
+    }
+  }
+
+  async function handleRepin() {
+    if (!token || !server) return;
+    setNotice(null);
+    setError(null);
+    setIsRepinning(true);
+    try {
+      const result = await repinServerHostKey(token, server.id);
+      const refreshed = await getServer(token, server.id);
+      setServer(refreshed);
+      setNotice(
+        result.previous_fingerprint && result.previous_fingerprint !== result.fingerprint
+          ? `Host key replaced. Was ${result.previous_fingerprint}, now ${result.fingerprint}. Verify it against the server itself.`
+          : `Host key pinned: ${result.fingerprint}. Verify it against the server itself.`,
+      );
+    } catch (repinError) {
+      setError(repinError instanceof Error ? repinError.message : "Could not re-pin host key");
+    } finally {
+      setIsRepinning(false);
     }
   }
 
@@ -243,15 +285,46 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
         </div>
         <dl className="detail-list">
           <div><dt>Public key</dt><dd>{server.public_ssh_key ? <PublicKeyBlock publicKey={server.public_ssh_key} /> : "Manual key uploaded"}</dd></div>
-          <div><dt>Fingerprint</dt><dd>{server.private_key_fingerprint ?? "Not available"}</dd></div>
+          <div><dt>Key fingerprint</dt><dd>{server.private_key_fingerprint ?? "Not available"}</dd></div>
+          <div>
+            <dt>Host key</dt>
+            <dd>
+              {server.known_host_key_fingerprint ? (
+                <>
+                  <code className="inline-code">{server.known_host_key_fingerprint}</code>
+                  <span className="field-helper">
+                    Pinned {formatDateTime(server.known_host_key_pinned_at)}. Compare it against
+                    <code className="inline-code">ssh-keyscan {server.host}</code> run on a machine you trust.
+                  </span>
+                </>
+              ) : (
+                <span className="field-helper">
+                  Not pinned yet. Test the connection to pin the host key this server presents.
+                </span>
+              )}
+            </dd>
+          </div>
           <div><dt>Last checked</dt><dd>{formatDateTime(server.last_connection_check_at) === "Not available" ? "Never" : formatDateTime(server.last_connection_check_at)}</dd></div>
           <div><dt>Last error</dt><dd>{server.last_connection_error ?? "None"}</dd></div>
         </dl>
         {notice ? <p className="success-message">{notice}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}
-        <button className="secondary-button" disabled={isTesting} type="button" onClick={() => void handleTest()}>
-          {isTesting ? "Testing connection" : "Test connection"}
-        </button>
+        <div className="row-actions">
+          <button className="secondary-button" disabled={isTesting} type="button" onClick={() => void handleTest()}>
+            {isTesting ? "Testing connection" : "Test connection"}
+          </button>
+          {server.known_host_key_fingerprint ? (
+            <button className="danger-button" disabled={isRepinning} type="button" onClick={() => void handleRepin()}>
+              {isRepinning ? "Re-pinning host key" : "Re-pin host key"}
+            </button>
+          ) : null}
+        </div>
+        {server.known_host_key_fingerprint ? (
+          <p className="field-helper">
+            Only re-pin after you rebuilt this server or rotated its host key on purpose. If the host key changed
+            unexpectedly, treat it as an interception attempt and investigate before re-pinning.
+          </p>
+        ) : null}
       </section>
       <aside className="form-panel">
         <h2>Edit server</h2>

@@ -2,7 +2,6 @@ from pydantic import BaseModel, Field
 
 from app.schemas.user import UserRead
 
-
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
 

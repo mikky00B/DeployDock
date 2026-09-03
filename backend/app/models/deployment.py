@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Uuid
 
@@ -28,6 +28,16 @@ class Deployment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_deployments_app_id", "app_id"),
         Index("ix_deployments_status", "status"),
+        # At most one non-terminal deployment per app. This is the authoritative
+        # concurrency guard: the service-layer check is a friendlier error path,
+        # but only the database can settle a race between two API workers.
+        Index(
+            "uq_deployments_active_per_app",
+            "app_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+            sqlite_where=text("status IN ('pending', 'running')"),
+        ),
     )
 
     owner_id: Mapped[uuid.UUID] = mapped_column(

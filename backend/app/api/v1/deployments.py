@@ -99,7 +99,11 @@ async def deployment_log_stream(
     )
 
 
-@router.post("/deployments/{deployment_id}/rollback", response_model=DeploymentRead, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/deployments/{deployment_id}/rollback",
+    response_model=DeploymentRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def rollback_deployment(
     deployment_id: uuid.UUID,
     background_tasks: BackgroundTasks,

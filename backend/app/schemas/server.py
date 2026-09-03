@@ -32,6 +32,8 @@ class ServerRead(BaseModel):
     auth_type: ServerAuthType
     public_ssh_key: str | None
     private_key_fingerprint: str | None
+    known_host_key_fingerprint: str | None
+    known_host_key_pinned_at: datetime | None
     status: ServerStatus
     last_connection_check_at: datetime | None
     last_connection_error: str | None
@@ -44,4 +46,12 @@ class ServerRead(BaseModel):
 class ServerConnectionTestRead(BaseModel):
     success: bool
     status: ServerStatus
+    message: str
+    host_key_fingerprint: str | None = None
+
+
+class ServerHostKeyRead(BaseModel):
+    fingerprint: str
+    algorithm: str
+    previous_fingerprint: str | None = None
     message: str

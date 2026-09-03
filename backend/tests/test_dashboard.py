@@ -13,7 +13,6 @@ from app.models import App, Deployment, Server
 from app.models.deployment import DeploymentStatus
 from app.models.server import ServerStatus
 
-
 TEST_PRIVATE_KEY = """-----BEGIN OPENSSH PRIVATE KEY-----
 test-private-key
 -----END OPENSSH PRIVATE KEY-----"""

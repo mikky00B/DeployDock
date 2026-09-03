@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { AppDetailPage, AppsPage } from "./pages/AppsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DeploymentDetailPage, DeploymentsPage } from "./pages/DeploymentsPage";
+import { LandingPage } from "./pages/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { ServerDetailPage, ServersPage } from "./pages/ServersPage";
@@ -34,6 +35,9 @@ function RouterView() {
   useEffect(() => {
     if (isLoading) return;
 
+    // The landing page is public — no auth redirect.
+    if (route.route === "/") return;
+
     if (!user && route.route !== "/login" && route.route !== "/register") {
       navigateTo("/login");
       return;
@@ -50,6 +54,10 @@ function RouterView() {
         <div className="loading-mark">DeployDock</div>
       </main>
     );
+  }
+
+  if (route.route === "/") {
+    return <LandingPage />;
   }
 
   if (!user) {

@@ -3,7 +3,7 @@ import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { apiClient } from "../api/client";
 import type { DeploymentLog, DeploymentStatus } from "../types/deployment";
 
-type StreamState = {
+export type StreamState = {
   logs: DeploymentLog[];
   status: DeploymentStatus | null;
   error: string | null;
@@ -61,7 +61,7 @@ export function useDeploymentStream(token: string | null, deploymentId: string |
   return state;
 }
 
-function handleSseEvent(rawEvent: string, setState: Dispatch<SetStateAction<StreamState>>) {
+export function handleSseEvent(rawEvent: string, setState: Dispatch<SetStateAction<StreamState>>) {
   const lines = rawEvent.split("\n");
   const eventLine = lines.find((line) => line.startsWith("event: "));
   const dataLines = lines.filter((line) => line.startsWith("data: "));
@@ -69,7 +69,14 @@ function handleSseEvent(rawEvent: string, setState: Dispatch<SetStateAction<Stre
 
   const eventName = eventLine.replace("event: ", "");
   const rawData = dataLines.map((line) => line.replace("data: ", "")).join("\n");
-  const data = JSON.parse(rawData) as Record<string, unknown>;
+
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(rawData) as Record<string, unknown>;
+  } catch {
+    // A malformed frame must not tear down a live deployment log view.
+    return;
+  }
 
   if (eventName === "log") {
     setState((current) => ({

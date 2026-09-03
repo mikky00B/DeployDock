@@ -7,11 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
-from app.core.encryption import decrypt_text
+from app.core.secrets import decrypt_secret
 from app.models import App, Deployment, DeploymentLog, Server
 from app.models.deployment import DeploymentStatus
 from app.models.deployment_log import DeploymentLogStream
 from app.services.audit_service import create_audit_log
+from app.services.deployment_events import deployment_event_bus
 from app.services.ssh_service import SSHCommandResult, SSHService
 
 
@@ -26,8 +27,13 @@ class DeploymentRunner:
         self.sessionmaker = sessionmaker
         self.settings = settings
         self.ssh_service = ssh_service
+        # Monotonic log line counter for the deployment currently being run.
+        # A single runner owns a deployment end to end, so a local counter is both
+        # correct and O(1) - unlike len(deployment.logs), which was O(n) per line.
+        self._sequence = 0
 
     async def run(self, deployment_id: uuid.UUID) -> None:
+        self._sequence = 0
         async with self.sessionmaker() as session:
             deployment = await self._get_deployment(session, deployment_id)
             app = deployment.app
@@ -38,8 +44,9 @@ class DeploymentRunner:
             deployment.started_at = started_at
             await self._add_log(session, deployment, DeploymentLogStream.system, "Deployment started")
             await session.commit()
+            deployment_event_bus.notify(deployment.id)
 
-            private_key = decrypt_text(server.encrypted_private_key, self.settings.encryption_key)
+            private_key = decrypt_secret(server.encrypted_private_key, self.settings)
 
             try:
                 previous_commit = await self._read_current_commit(server, app, private_key)
@@ -58,9 +65,12 @@ class DeploymentRunner:
                     username=server.username,
                     private_key=private_key,
                     command=build_deploy_command(app.app_path, app.deploy_command),
-                    timeout_seconds=900,
+                    known_host_key=server.known_host_key,
+                    timeout_seconds=self.settings.deploy_timeout_seconds,
                 )
                 await self._save_command_output(session, deployment, result)
+                await session.commit()
+                deployment_event_bus.notify(deployment.id)
 
                 deployment.exit_code = result.exit_code
                 if result.exit_code == 0:
@@ -68,7 +78,9 @@ class DeploymentRunner:
                     deployment.commit_sha = await self._read_current_commit(server, app, private_key)
                     app.current_commit = deployment.commit_sha
                     app.last_successful_commit = deployment.commit_sha
-                    await self._add_log(session, deployment, DeploymentLogStream.system, "Deployment succeeded")
+                    await self._add_log(
+                        session, deployment, DeploymentLogStream.system, "Deployment succeeded"
+                    )
                     await create_audit_log(
                         session,
                         current_user=deployment.owner,
@@ -106,8 +118,10 @@ class DeploymentRunner:
                 deployment.finished_at = finished_at
                 deployment.duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
                 await session.commit()
+                deployment_event_bus.notify(deployment.id)
 
     async def run_rollback(self, deployment_id: uuid.UUID) -> None:
+        self._sequence = 0
         async with self.sessionmaker() as session:
             deployment = await self._get_deployment(session, deployment_id)
             app = deployment.app
@@ -119,6 +133,7 @@ class DeploymentRunner:
             deployment.started_at = started_at
             await self._add_log(session, deployment, DeploymentLogStream.system, "Rollback started")
             await session.commit()
+            deployment_event_bus.notify(deployment.id)
 
             if target_commit is None:
                 deployment.status = DeploymentStatus.failed
@@ -129,7 +144,7 @@ class DeploymentRunner:
                 await session.commit()
                 return
 
-            private_key = decrypt_text(server.encrypted_private_key, self.settings.encryption_key)
+            private_key = decrypt_secret(server.encrypted_private_key, self.settings)
 
             try:
                 result = await self.ssh_service.run_command(
@@ -138,9 +153,12 @@ class DeploymentRunner:
                     username=server.username,
                     private_key=private_key,
                     command=build_rollback_command(app, target_commit),
-                    timeout_seconds=300,
+                    known_host_key=server.known_host_key,
+                    timeout_seconds=self.settings.rollback_timeout_seconds,
                 )
                 await self._save_command_output(session, deployment, result)
+                await session.commit()
+                deployment_event_bus.notify(deployment.id)
 
                 deployment.exit_code = result.exit_code
                 if result.exit_code == 0:
@@ -161,6 +179,7 @@ class DeploymentRunner:
                 deployment.finished_at = finished_at
                 deployment.duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
                 await session.commit()
+                deployment_event_bus.notify(deployment.id)
 
     async def _get_deployment(self, session: AsyncSession, deployment_id: uuid.UUID) -> Deployment:
         result = await session.execute(
@@ -183,6 +202,7 @@ class DeploymentRunner:
             username=server.username,
             private_key=private_key,
             command=build_git_commit_command(app.app_path),
+            known_host_key=server.known_host_key,
             timeout_seconds=30,
         )
         if result.exit_code != 0:
@@ -208,7 +228,8 @@ class DeploymentRunner:
         stream: DeploymentLogStream,
         line: str,
     ) -> None:
-        sequence = len(deployment.logs) + 1
+        self._sequence += 1
+        sequence = self._sequence
         log = DeploymentLog(
             deployment_id=deployment.id,
             stream=stream,

@@ -1,19 +1,26 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
 from app.models import User
-from app.schemas.server import ServerConnectionTestRead, ServerCreate, ServerRead, ServerUpdate
+from app.schemas.server import (
+    ServerConnectionTestRead,
+    ServerCreate,
+    ServerHostKeyRead,
+    ServerRead,
+    ServerUpdate,
+)
 from app.services.server_service import (
     create_server,
     delete_server,
     get_server_for_user,
     list_servers,
+    repin_server_host_key,
     test_server_connection,
     update_server,
 )
@@ -97,4 +104,43 @@ async def test_connection(
         settings=settings,
         ssh_service=ssh_service,
     )
-    return ServerConnectionTestRead(success=success, status=server.status, message=message)
+    return ServerConnectionTestRead(
+        success=success,
+        status=server.status,
+        message=message,
+        host_key_fingerprint=server.known_host_key_fingerprint,
+    )
+
+
+@router.post("/{server_id}/host-key", response_model=ServerHostKeyRead)
+async def repin_host_key(
+    server_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    ssh_service: Annotated[SSHService, Depends(get_ssh_service)],
+) -> ServerHostKeyRead:
+    """Re-pin the server's SSH host key after a legitimate rebuild or key rotation.
+
+    Deliberately explicit: DeployDock never re-pins automatically, because an
+    unexpected host key change is indistinguishable from an interception attempt.
+    """
+    server = await get_server_for_user(session, server_id=server_id, current_user=current_user)
+    try:
+        host_key, previous_fingerprint = await repin_server_host_key(
+            session,
+            server=server,
+            current_user=current_user,
+            ssh_service=ssh_service,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not read host key from {server.host}:{server.port}: {exc}",
+        ) from exc
+
+    return ServerHostKeyRead(
+        fingerprint=host_key.fingerprint,
+        algorithm=host_key.algorithm,
+        previous_fingerprint=previous_fingerprint,
+        message="Host key pinned. Verify this fingerprint against the server itself.",
+    )

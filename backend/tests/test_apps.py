@@ -10,7 +10,6 @@ from app.main import app
 from app.models import AuditLog
 from app.services.ssh_service import SSHCommandResult, get_ssh_service
 
-
 TEST_PRIVATE_KEY = """-----BEGIN OPENSSH PRIVATE KEY-----
 test-private-key
 -----END OPENSSH PRIVATE KEY-----"""
@@ -99,6 +98,7 @@ class RecordingSSHService:
         username: str,
         private_key: str,
         command: str,
+        known_host_key: str | None = None,
         timeout_seconds: int = 15,
     ) -> SSHCommandResult:
         self.calls.append(

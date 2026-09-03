@@ -1,5 +1,5 @@
 import { apiClient } from "./client";
-import type { Server, ServerConnectionTest, ServerPayload } from "../types/server";
+import type { Server, ServerConnectionTest, ServerHostKey, ServerPayload } from "../types/server";
 
 export function listServers(token: string) {
   return apiClient.request<Server[]>("/api/v1/servers", { method: "GET", token });
@@ -26,6 +26,18 @@ export function deleteServer(token: string, serverId: string) {
 
 export function testServerConnection(token: string, serverId: string) {
   return apiClient.request<ServerConnectionTest>(`/api/v1/servers/${serverId}/test-connection`, {
+    method: "POST",
+    token,
+  });
+}
+
+/**
+ * Re-pin the server's SSH host key. Only call this after the operator has
+ * confirmed the change is legitimate: an unexpected host key change is
+ * indistinguishable from an interception attempt.
+ */
+export function repinServerHostKey(token: string, serverId: string) {
+  return apiClient.request<ServerHostKey>(`/api/v1/servers/${serverId}/host-key`, {
     method: "POST",
     token,
   });

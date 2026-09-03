@@ -6,12 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
-from app.core.encryption import decrypt_text
+from app.core.secrets import decrypt_secret
 from app.models import App, User
 from app.schemas.app import AppCreate, AppUpdate
 from app.services.audit_service import create_audit_log
 from app.services.server_service import get_server_for_user
-from app.services.ssh_service import SSHCommandResult, SSHService
+from app.services.ssh_service import (
+    HostKeyMismatchError,
+    HostKeyUnpinnedError,
+    SSHCommandResult,
+    SSHService,
+)
 
 
 async def create_app(
@@ -176,7 +181,10 @@ async def get_app_service_logs(
     ssh_service: SSHService,
 ) -> str:
     if not app.service_name:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="App does not have a service name")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="App does not have a service name",
+        )
 
     result = await run_app_command(
         app=app,
@@ -201,7 +209,7 @@ async def run_app_command(
     command: str,
     timeout_seconds: int,
 ) -> SSHCommandResult:
-    private_key = decrypt_text(app.server.encrypted_private_key, settings.encryption_key)
+    private_key = decrypt_secret(app.server.encrypted_private_key, settings)
     try:
         return await ssh_service.run_command(
             host=app.server.host,
@@ -209,8 +217,11 @@ async def run_app_command(
             username=app.server.username,
             private_key=private_key,
             command=command,
+            known_host_key=app.server.known_host_key,
             timeout_seconds=timeout_seconds,
         )
+    except (HostKeyMismatchError, HostKeyUnpinnedError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

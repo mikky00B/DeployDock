@@ -1,4 +1,3 @@
-import asyncio
 import json
 import uuid
 from collections.abc import AsyncGenerator
@@ -8,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import Deployment, DeploymentLog
 from app.models.deployment import DeploymentStatus
+from app.services.deployment_events import deployment_event_bus
 
 TERMINAL_DEPLOYMENT_STATUSES = {
     DeploymentStatus.success,
@@ -15,13 +15,17 @@ TERMINAL_DEPLOYMENT_STATUSES = {
     DeploymentStatus.canceled,
 }
 
+# How long a stream waits for a notification before checking the database anyway.
+# Also the heartbeat interval, which keeps proxies from closing an idle connection.
+IDLE_POLL_SECONDS = 15.0
+
 
 async def stream_deployment_events(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     deployment_id: uuid.UUID,
     owner_id: uuid.UUID,
-    poll_interval_seconds: float = 1.0,
+    idle_poll_seconds: float = IDLE_POLL_SECONDS,
 ) -> AsyncGenerator[str, None]:
     last_sequence = 0
 
@@ -57,10 +61,14 @@ async def stream_deployment_events(
             yield format_sse("status", {"status": deployment.status.value})
             return
 
-        if not logs:
-            yield format_sse("heartbeat", {"status": deployment.status.value})
+        if logs:
+            # More output may already be queued; loop immediately rather than sleeping.
+            continue
 
-        await asyncio.sleep(poll_interval_seconds)
+        # Sleep until the runner signals new output, or the idle timeout expires.
+        woken = await deployment_event_bus.wait(deployment_id, timeout=idle_poll_seconds)
+        if not woken:
+            yield format_sse("heartbeat", {"status": deployment.status.value})
 
 
 def format_sse(event: str, data: dict[str, object]) -> str:

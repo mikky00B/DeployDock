@@ -20,8 +20,8 @@ from app.services.app_service import (
     check_app_service_status,
     create_app,
     delete_app,
-    get_app_service_logs,
     get_app_for_user,
+    get_app_service_logs,
     list_apps,
     restart_app_service,
     update_app,
@@ -90,7 +90,8 @@ async def restart_service(
         ssh_service=ssh_service,
     )
     success = result.exit_code == 0
-    message = result.stdout.strip() or result.stderr.strip() or ("Service restarted" if success else "Service restart failed")
+    default_message = "Service restarted" if success else "Service restart failed"
+    message = result.stdout.strip() or result.stderr.strip() or default_message
     return AppServiceRestartRead(
         service_name=app.service_name,
         success=success,

@@ -1,3 +1,4 @@
+from app.models.agent import Agent, AgentRegistrationToken, AgentReportedStatus
 from app.models.app import App
 from app.models.audit_log import AuditLog
 from app.models.deployment import Deployment, DeploymentKind, DeploymentStatus
@@ -6,6 +7,9 @@ from app.models.server import Server, ServerAuthType, ServerStatus
 from app.models.user import User
 
 __all__ = [
+    "Agent",
+    "AgentRegistrationToken",
+    "AgentReportedStatus",
     "App",
     "AuditLog",
     "Deployment",
