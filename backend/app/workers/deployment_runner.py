@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import Settings
 from app.core.secrets import decrypt_secret
 from app.models import App, Deployment, DeploymentLog, Server
-from app.models.deployment import DeploymentStatus
+from app.models.deployment import TERMINAL_DEPLOYMENT_STATUSES, DeploymentStatus
 from app.models.deployment_log import DeploymentLogStream
 from app.services.audit_service import create_audit_log
 from app.services.deployment_events import deployment_event_bus
@@ -39,6 +39,19 @@ class DeploymentRunner:
             app = deployment.app
             server = deployment.server
             started_at = datetime.now(UTC)
+
+            # Cancel checkpoint: the row may have been canceled while the
+            # background task sat in the queue.
+            await self._refresh_status(session, deployment)
+            if self._is_canceled(deployment):
+                await self._add_log(
+                    session,
+                    deployment,
+                    DeploymentLogStream.system,
+                    "Deployment canceled before start",
+                )
+                await session.commit()
+                return
 
             deployment.status = DeploymentStatus.running
             deployment.started_at = started_at
@@ -73,7 +86,27 @@ class DeploymentRunner:
                 deployment_event_bus.notify(deployment.id)
 
                 deployment.exit_code = result.exit_code
-                if result.exit_code == 0:
+                # Cancel checkpoint: the SSH bridge cannot abort a command that
+                # is already executing, so a cancel that lands mid-run is
+                # honoured here, after the current command has returned.
+                await self._refresh_status(session, deployment)
+                if self._is_canceled(deployment):
+                    deployment.exit_code = None
+                    await self._add_log(
+                        session,
+                        deployment,
+                        DeploymentLogStream.system,
+                        "Deployment canceled; ignoring the result of the command that was already running",
+                    )
+                    await create_audit_log(
+                        session,
+                        current_user=deployment.owner,
+                        action="deployment.canceled",
+                        entity_type="deployment",
+                        entity_id=deployment.id,
+                        metadata={"app_id": str(app.id), "note": "honored after command returned"},
+                    )
+                elif result.exit_code == 0:
                     deployment.status = DeploymentStatus.success
                     deployment.commit_sha = await self._read_current_commit(server, app, private_key)
                     app.current_commit = deployment.commit_sha
@@ -90,6 +123,8 @@ class DeploymentRunner:
                         metadata={"app_id": str(app.id), "commit_sha": deployment.commit_sha},
                     )
                 else:
+                    # A cancel already stamped the terminal status; never
+                    # overwrite it with "failed" here.
                     deployment.status = DeploymentStatus.failed
                     deployment.error_message = result.stderr.strip() or "Deployment command failed"
                     await self._add_log(session, deployment, DeploymentLogStream.system, "Deployment failed")
@@ -102,17 +137,26 @@ class DeploymentRunner:
                         metadata={"app_id": str(app.id), "exit_code": result.exit_code},
                     )
             except Exception as exc:
-                deployment.status = DeploymentStatus.failed
-                deployment.error_message = f"Deployment failed: {exc}"
-                await self._add_log(session, deployment, DeploymentLogStream.system, deployment.error_message)
-                await create_audit_log(
-                    session,
-                    current_user=deployment.owner,
-                    action="deployment.failed",
-                    entity_type="deployment",
-                    entity_id=deployment.id,
-                    metadata={"app_id": str(app.id), "error": str(exc)},
-                )
+                # Never overwrite a terminal status the API already stamped
+                # (e.g. a cancel that landed while the command was running).
+                await self._refresh_status(session, deployment)
+                if deployment.status not in TERMINAL_DEPLOYMENT_STATUSES:
+                    deployment.status = DeploymentStatus.failed
+                    deployment.error_message = f"Deployment failed: {exc}"
+                    await self._add_log(
+                        session,
+                        deployment,
+                        DeploymentLogStream.system,
+                        deployment.error_message,
+                    )
+                    await create_audit_log(
+                        session,
+                        current_user=deployment.owner,
+                        action="deployment.failed",
+                        entity_type="deployment",
+                        entity_id=deployment.id,
+                        metadata={"app_id": str(app.id), "error": str(exc)},
+                    )
             finally:
                 finished_at = datetime.now(UTC)
                 deployment.finished_at = finished_at
@@ -128,6 +172,19 @@ class DeploymentRunner:
             server = deployment.server
             target_commit = deployment.commit_sha
             started_at = datetime.now(UTC)
+
+            # Cancel checkpoint: the row may have been canceled while the
+            # background task sat in the queue.
+            await self._refresh_status(session, deployment)
+            if self._is_canceled(deployment):
+                await self._add_log(
+                    session,
+                    deployment,
+                    DeploymentLogStream.system,
+                    "Rollback canceled before start",
+                )
+                await session.commit()
+                return
 
             deployment.status = DeploymentStatus.running
             deployment.started_at = started_at
@@ -161,7 +218,16 @@ class DeploymentRunner:
                 deployment_event_bus.notify(deployment.id)
 
                 deployment.exit_code = result.exit_code
-                if result.exit_code == 0:
+                await self._refresh_status(session, deployment)
+                if self._is_canceled(deployment):
+                    deployment.exit_code = None
+                    await self._add_log(
+                        session,
+                        deployment,
+                        DeploymentLogStream.system,
+                        "Rollback canceled; ignoring the result of the command that was already running",
+                    )
+                elif result.exit_code == 0:
                     deployment.status = DeploymentStatus.success
                     deployment.commit_sha = target_commit
                     app.current_commit = target_commit
@@ -171,9 +237,18 @@ class DeploymentRunner:
                     deployment.error_message = result.stderr.strip() or "Rollback command failed"
                     await self._add_log(session, deployment, DeploymentLogStream.system, "Rollback failed")
             except Exception as exc:
-                deployment.status = DeploymentStatus.failed
-                deployment.error_message = f"Rollback failed: {exc}"
-                await self._add_log(session, deployment, DeploymentLogStream.system, deployment.error_message)
+                # Never overwrite a terminal status the API already stamped
+                # (e.g. a cancel that landed while the command was running).
+                await self._refresh_status(session, deployment)
+                if deployment.status not in TERMINAL_DEPLOYMENT_STATUSES:
+                    deployment.status = DeploymentStatus.failed
+                    deployment.error_message = f"Rollback failed: {exc}"
+                    await self._add_log(
+                        session,
+                        deployment,
+                        DeploymentLogStream.system,
+                        deployment.error_message,
+                    )
             finally:
                 finished_at = datetime.now(UTC)
                 deployment.finished_at = finished_at
@@ -194,6 +269,25 @@ class DeploymentRunner:
         )
         deployment = result.scalar_one()
         return deployment
+
+    async def _refresh_status(self, session: AsyncSession, deployment: Deployment) -> None:
+        """Re-read the committed status onto the tracked row.
+
+        Cancellation happens in a different transaction (the API request), so
+        the runner's in-memory copy goes stale; every checkpoint must look at
+        the database, not at its own last write.
+        """
+        await session.refresh(deployment, attribute_names=["status"])
+
+    def _is_canceled(self, deployment: Deployment) -> bool:
+        """True when the deployment row was canceled after creation.
+
+        Strict on purpose: the checkpoints only react to an actual cancel so
+        their log lines tell the truth, while the exception paths use the
+        broader terminal-status guard so they never overwrite a status the API
+        has already stamped.
+        """
+        return deployment.status is DeploymentStatus.canceled
 
     async def _read_current_commit(self, server: Server, app: App, private_key: str) -> str | None:
         result = await self.ssh_service.run_command(

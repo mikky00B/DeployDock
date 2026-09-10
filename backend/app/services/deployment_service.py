@@ -8,12 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import Deployment, DeploymentLog, User
-from app.models.deployment import DeploymentKind, DeploymentStatus
+from app.models.deployment import (
+    ACTIVE_DEPLOYMENT_STATUSES,
+    TERMINAL_DEPLOYMENT_STATUSES,
+    DeploymentKind,
+    DeploymentStatus,
+)
 from app.schemas.deployment_log import DeploymentLogRead
 from app.services.app_service import get_app_for_user
 from app.services.audit_service import create_audit_log
-
-ACTIVE_DEPLOYMENT_STATUSES = (DeploymentStatus.pending, DeploymentStatus.running)
+from app.services.deployment_events import deployment_event_bus
 
 
 async def get_active_deployment(session: AsyncSession, *, app_id: uuid.UUID) -> Deployment | None:
@@ -120,6 +124,56 @@ async def get_deployment_for_user(
     deployment = result.scalar_one_or_none()
     if deployment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+    return deployment
+
+
+async def cancel_deployment(
+    session: AsyncSession,
+    *,
+    deployment_id: uuid.UUID,
+    current_user: User,
+) -> Deployment:
+    """Request cancellation of a non-terminal deployment (spec §46).
+
+    The in-process runner cannot be interrupted mid-SSH-call, so this flips the
+    row to ``canceled`` immediately and the runner honours it at its next
+    checkpoint (before starting and after the current command returns).
+
+    Canceling is idempotent while the row is ``canceled`` (a second request
+    returns the row unchanged, no duplicate audit entry), while every other
+    terminal status is immutable and answers 409.
+    """
+    deployment = await get_deployment_for_user(
+        session,
+        deployment_id=deployment_id,
+        current_user=current_user,
+    )
+    if deployment.status is DeploymentStatus.canceled:
+        # Idempotent no-op: the row is already terminal, just not immutable.
+        return deployment
+    if deployment.status in TERMINAL_DEPLOYMENT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Deployment {deployment.id} is already {deployment.status.value} and cannot be canceled",
+        )
+
+    deployment.status = DeploymentStatus.canceled
+    deployment.finished_at = datetime.now(UTC)
+    if deployment.started_at is not None:
+        deployment.duration_seconds = max(
+            0, int((deployment.finished_at - _as_utc(deployment.started_at)).total_seconds())
+        )
+    await create_audit_log(
+        session,
+        current_user=current_user,
+        action="deployment.canceled",
+        entity_type="deployment",
+        entity_id=deployment.id,
+        metadata={"app_id": str(deployment.app_id)},
+    )
+    await session.commit()
+    await session.refresh(deployment)
+    deployment_event_bus.notify(deployment.id)
     return deployment
 
 
@@ -233,7 +287,7 @@ async def fail_orphaned_deployments(
     *,
     older_than_seconds: int,
 ) -> int:
-    """Mark deployments stuck in pending/running as failed.
+    """Mark deployments stuck in an active status (pending, pipeline stage, running) as failed.
 
     A deploy runs inside the API process, so a restart, crash, or worker recycle
     mid-deploy leaves the row non-terminal forever - blocking every later deploy of
@@ -258,9 +312,16 @@ async def fail_orphaned_deployments(
         deployment.finished_at = datetime.now(UTC)
         if deployment.started_at is not None:
             deployment.duration_seconds = max(
-                0, int((deployment.finished_at - deployment.started_at).total_seconds())
+                0, int((deployment.finished_at - _as_utc(deployment.started_at)).total_seconds())
             )
 
     if orphaned:
         await session.commit()
     return len(orphaned)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """SQLite returns naive datetimes; treat them as UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value

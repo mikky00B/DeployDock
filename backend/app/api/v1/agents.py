@@ -49,7 +49,11 @@ async def get_current_agent(
     return await get_agent_by_token(session, token=credentials.credentials)
 
 
-@router.post("/registration-tokens", response_model=AgentRegistrationTokenRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/registration-tokens",
+    response_model=AgentRegistrationTokenRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_registration_token_endpoint(
     payload: AgentRegistrationTokenCreate,
     current_user: Annotated[User, Depends(get_current_user)],

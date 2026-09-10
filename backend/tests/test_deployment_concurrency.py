@@ -114,7 +114,13 @@ async def test_two_apps_may_deploy_at_the_same_time(session_factory) -> None:
 
 @pytest.mark.parametrize(
     "status",
-    [DeploymentStatus.pending, DeploymentStatus.running],
+    [
+        DeploymentStatus.pending,
+        DeploymentStatus.running,
+        DeploymentStatus.queued,
+        DeploymentStatus.building,
+        DeploymentStatus.health_check,
+    ],
 )
 async def test_get_active_deployment_finds_non_terminal_rows(session_factory, status) -> None:
     async with session_factory() as session:

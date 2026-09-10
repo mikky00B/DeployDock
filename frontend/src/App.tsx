@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { AppDetailPage, AppsPage } from "./pages/AppsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DeploymentDetailPage, DeploymentsPage } from "./pages/DeploymentsPage";
+import { DocsPage } from "./pages/DocsPage";
 import { LandingPage } from "./pages/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
@@ -75,6 +76,7 @@ function RouterView() {
       {route.route === "/deployments" && route.deploymentId ? (
         <DeploymentDetailPage deploymentId={route.deploymentId} />
       ) : null}
+      {route.route === "/docs" ? <DocsPage /> : null}
     </AppShell>
   );
 }

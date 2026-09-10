@@ -12,6 +12,7 @@ from app.models import User
 from app.schemas.deployment import DeploymentDetailRead, DeploymentRead
 from app.schemas.deployment_log import DeploymentLogRead
 from app.services.deployment_service import (
+    cancel_deployment,
     create_deployment,
     create_rollback_deployment,
     get_deployment_for_user,
@@ -78,6 +79,24 @@ async def deployment_logs(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[DeploymentLogRead]:
     return await list_deployment_logs(session, deployment_id=deployment_id, current_user=current_user)
+
+
+@router.post(
+    "/deployments/{deployment_id}/cancel",
+    response_model=DeploymentRead,
+)
+async def cancel_deployment_endpoint(
+    deployment_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> DeploymentRead:
+    """Cancel a non-terminal deployment (spec §46).
+
+    The runner honours this at its next checkpoint; the SSH bridge cannot abort
+    a command that is already executing on the server.
+    """
+    deployment = await cancel_deployment(session, deployment_id=deployment_id, current_user=current_user)
+    return DeploymentRead.model_validate(deployment)
 
 
 @router.get("/deployments/{deployment_id}/stream")

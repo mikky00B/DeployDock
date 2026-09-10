@@ -1,4 +1,29 @@
-export type DeploymentStatus = "pending" | "running" | "success" | "failed" | "canceled";
+export type DeploymentStatus =
+  | "pending"
+  | "queued"
+  | "cloning"
+  | "building"
+  | "testing"
+  | "deploying"
+  | "health_check"
+  | "running"
+  | "success"
+  | "failed"
+  | "canceled"
+  | "rolled_back";
+
+/** Statuses in which a deployment is still in flight and blocks a new one. */
+export const ACTIVE_DEPLOYMENT_STATUSES: readonly DeploymentStatus[] = [
+  "pending",
+  "queued",
+  "cloning",
+  "building",
+  "testing",
+  "deploying",
+  "health_check",
+  "running",
+];
+
 export type DeploymentKind = "deploy" | "rollback";
 export type DeploymentLogStream = "stdout" | "stderr" | "system";
 

@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.models import Agent, AgentRegistrationToken, AgentReportedStatus, AuditLog, User
+from app.models import Agent, AgentRegistrationToken, AgentReportedStatus, User
 from app.services.audit_service import create_audit_log
 
 REGISTRATION_TOKEN_PREFIX = "dck_rt_"
@@ -92,6 +92,13 @@ async def register_agent(
     session.add(agent)
     # Loaded explicitly: lazy loading relationships is not allowed on AsyncSession.
     owner = await session.get(User, record.owner_id)
+    if owner is None:
+        # owner_id is a non-null FK, so this only happens if the user row
+        # vanished between token minting and registration.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Registration token owner no longer exists",
+        )
     await create_audit_log(
         session,
         current_user=owner,
@@ -159,7 +166,8 @@ async def get_agent_by_token(session: AsyncSession, *, token: str) -> Agent:
     401 for unknown/revoked tokens; 409 for a token that is valid but whose
     agent was retired, so the agent knows to stop (and not re-register).
     """
-    agent = (await session.execute(select(Agent).where(Agent.token_hash == hash_token(token)))).scalar_one_or_none()
+    result = await session.execute(select(Agent).where(Agent.token_hash == hash_token(token)))
+    agent = result.scalar_one_or_none()
     if agent is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -11,11 +11,46 @@ from app.models.base import TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class DeploymentStatus(str, enum.Enum):
+    """Lifecycle of a deployment (spec §13).
+
+    The pipeline states between ``pending`` and ``success``/``failed`` become
+    active as the agent-driven engine (Phase 3) reports stage events; the SSH
+    bridge runner only uses ``pending``/``running`` for now.
+    """
+
     pending = "pending"
+    queued = "queued"
+    cloning = "cloning"
+    building = "building"
+    testing = "testing"
+    deploying = "deploying"
+    health_check = "health_check"
     running = "running"
     success = "success"
     failed = "failed"
     canceled = "canceled"
+    rolled_back = "rolled_back"
+
+
+# Canonical status groups. Kept next to the enum so the concurrency guard,
+# the SSE stream, and the orphan sweep cannot drift apart.
+ACTIVE_DEPLOYMENT_STATUSES = (
+    DeploymentStatus.pending,
+    DeploymentStatus.queued,
+    DeploymentStatus.cloning,
+    DeploymentStatus.building,
+    DeploymentStatus.testing,
+    DeploymentStatus.deploying,
+    DeploymentStatus.health_check,
+    DeploymentStatus.running,
+)
+
+TERMINAL_DEPLOYMENT_STATUSES = (
+    DeploymentStatus.success,
+    DeploymentStatus.failed,
+    DeploymentStatus.canceled,
+    DeploymentStatus.rolled_back,
+)
 
 
 class DeploymentKind(str, enum.Enum):

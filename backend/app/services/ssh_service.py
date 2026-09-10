@@ -127,10 +127,14 @@ class SSHService:
                 "replaced this server, re-pin its host key from the server page."
             ) from exc
 
+        # asyncssh >= 2.19 widened these types: stdout/stderr can be None (or
+        # bytes in binary mode), and exit_status is None when the server sent
+        # no exit status at all (e.g. the channel closed early) - treat that as
+        # a failure rather than a silent success.
         return SSHCommandResult(
-            exit_code=result.exit_status,
-            stdout=result.stdout,
-            stderr=result.stderr,
+            exit_code=result.exit_status if result.exit_status is not None else 1,
+            stdout=result.stdout if isinstance(result.stdout, str) else "",
+            stderr=result.stderr if isinstance(result.stderr, str) else "",
         )
 
 

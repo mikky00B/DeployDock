@@ -29,3 +29,7 @@ DeployDock_v2_Master_Spec.md
 
 # Local design handoff assets
 design_handoff_deploydock_landing/
+
+# Local notes and scratch output (not for the repo)
+presentsummery.txt
+deploydock-hardening.patch
