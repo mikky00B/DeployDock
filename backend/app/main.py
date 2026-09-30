@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
@@ -61,6 +61,72 @@ async def readiness() -> dict[str, str]:
     async with engine.connect() as connection:
         await connection.execute(text("SELECT 1"))
     return {"status": "ok", "database": "reachable"}
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Prometheus-text metrics (spec §48): deployment totals, durations, and
+    agent liveness. Rendered without a client library on purpose."""
+    from sqlalchemy import func, select
+
+    from app.models import Agent, App, Deployment, Server
+    from app.models.deployment import DeploymentStatus, TERMINAL_DEPLOYMENT_STATUSES
+
+    try:
+        async with AsyncSessionLocal() as session:
+            status_counts = dict(
+                (await session.execute(
+                    select(Deployment.status, func.count()).group_by(Deployment.status)
+                )).all()
+            )
+            duration = (await session.execute(
+                select(func.count(), func.sum(Deployment.duration_seconds)).where(
+                    Deployment.status.in_(TERMINAL_DEPLOYMENT_STATUSES),
+                    Deployment.duration_seconds.is_not(None),
+                )
+            )).one()
+            total_servers = await session.scalar(select(func.count()).select_from(Server))
+            total_apps = await session.scalar(select(func.count()).select_from(App))
+            agents = list((await session.execute(select(Agent))).scalars().all())
+    except OperationalError:
+        return Response(
+            status_code=503,
+            content="# metrics unavailable: database unreachable\n",
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    lines: list[str] = []
+    lines.append("# HELP deployment_total Deployments by status.")
+    lines.append("# TYPE deployment_total counter")
+    for status_value in DeploymentStatus:
+        lines.append(f'deployment_total{{status="{status_value.value}"}} {status_counts.get(status_value, 0)}')
+
+    deploy_count, duration_sum = duration[0] or 0, duration[1] or 0
+    lines.append("# HELP deployment_duration_seconds_sum Total deploy duration of terminal deployments.")
+    lines.append("# TYPE deployment_duration_seconds_sum counter")
+    lines.append(f"deployment_duration_seconds_sum {duration_sum}")
+    lines.append("# TYPE deployment_duration_seconds_count counter")
+    lines.append(f"deployment_duration_seconds_count {deploy_count}")
+
+    lines.append("# HELP servers_total Registered servers.")
+    lines.append("# TYPE servers_total gauge")
+    lines.append(f"servers_total {total_servers or 0}")
+    lines.append("# HELP apps_total Registered apps.")
+    lines.append("# TYPE apps_total gauge")
+    lines.append(f"apps_total {total_apps or 0}")
+
+    lines.append("# HELP agents_online Agents with a heartbeat inside the offline window.")
+    lines.append("# TYPE agents_online gauge")
+    from app.services.agent_service import is_online
+
+    online = sum(1 for agent in agents if is_online(agent, settings))
+    lines.append(f"agents_online {online}")
+    lines.append("# HELP agents_total Registered agents.")
+    lines.append("# TYPE agents_total gauge")
+    lines.append(f"agents_total {len(agents)}")
+
+    body = "\n".join(lines) + "\n"
+    return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.exception_handler(OperationalError)

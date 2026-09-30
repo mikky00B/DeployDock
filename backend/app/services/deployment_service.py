@@ -56,15 +56,41 @@ async def create_deployment(
     *,
     app_id: uuid.UUID,
     current_user: User,
+    queue_if_active: bool = False,
+    commit_message: str | None = None,
 ) -> Deployment:
+    """Create a deployment, optionally queueing behind an active one (spec §42).
+
+    Interactive deploys keep the strict 409 contract; automatic deploys
+    (GitHub webhooks) set ``queue_if_active`` so two quick pushes queue the
+    second instead of failing it. Queued deployments are promoted by
+    ``promote_next_queued_deployment`` when the active one turns terminal.
+    """
     app = await get_app_for_user(session, app_id=app_id, current_user=current_user)
-    await _guard_against_concurrent_deployment(session, app_id=app.id)
+    active = await get_active_deployment(session, app_id=app.id)
+    if active is not None:
+        if not queue_if_active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Deployment {active.id} is already {active.status.value} for this app. "
+                    "Wait for it to finish before starting another."
+                ),
+            )
+        if active.status is DeploymentStatus.queued:
+            # A queued deployment is itself active-only-one: never stack queued rows.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A deployment for this app is already queued. Wait for it to run.",
+            )
     deployment = Deployment(
         owner_id=current_user.id,
         app_id=app.id,
         server_id=app.server_id,
-        status=DeploymentStatus.pending,
+        status=DeploymentStatus.queued if active is not None else DeploymentStatus.pending,
         kind=DeploymentKind.deploy,
+        commit_sha=None,
+        commit_message=commit_message,
         triggered_by=current_user.email,
     )
     session.add(deployment)

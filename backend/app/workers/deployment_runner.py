@@ -1,3 +1,4 @@
+import asyncio
 import shlex
 import uuid
 from datetime import UTC, datetime
@@ -163,6 +164,7 @@ class DeploymentRunner:
                 deployment.duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
                 await session.commit()
                 deployment_event_bus.notify(deployment.id)
+                await self._promote_next_queued(session, deployment)
 
     async def run_rollback(self, deployment_id: uuid.UUID) -> None:
         self._sequence = 0
@@ -255,6 +257,32 @@ class DeploymentRunner:
                 deployment.duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
                 await session.commit()
                 deployment_event_bus.notify(deployment.id)
+                await self._promote_next_queued(session, deployment)
+
+    async def _promote_next_queued(self, session: AsyncSession, deployment: Deployment) -> None:
+        """Promote (spec §42) and dispatch whatever queued behind this deploy.
+
+        Runs after the terminal commit: the promoted deployment either goes to
+        the server's agent as a command, or — on agent-less servers — back
+        through this SSH runner as a follow-up task.
+        """
+        from app.services.agent_dispatch import (
+            dispatch_deployment,
+            promote_next_queued_deployment,
+        )
+
+        try:
+            promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
+        except Exception:  # noqa: BLE001 - promotion must never fail the deploy
+            return
+        if promoted is None:
+            return
+        try:
+            dispatched = await dispatch_deployment(session, deployment=promoted)
+        except Exception:  # noqa: BLE001
+            dispatched = False
+        if not dispatched:
+            asyncio.create_task(self.run(promoted.id))
 
     async def _get_deployment(self, session: AsyncSession, deployment_id: uuid.UUID) -> Deployment:
         result = await session.execute(
