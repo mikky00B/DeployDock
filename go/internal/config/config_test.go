@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -25,8 +26,10 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state file missing: %v", err)
 	}
-	// On POSIX the file must be owner-only because it holds the token.
-	if info.Mode().Perm() != 0o600 && os.Getenv("GOOS") == "" && info.Mode().Perm()&0o077 != 0 {
+	// On POSIX the file must be owner-only because it holds the token. Windows
+	// does not implement POSIX permission bits (os.WriteFile's mode only maps
+	// to the read-only attribute there), so the check would always fail.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Errorf("state file permissions too open: %v", info.Mode().Perm())
 	}
 

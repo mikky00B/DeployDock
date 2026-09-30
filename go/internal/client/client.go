@@ -47,6 +47,70 @@ type HeartbeatResponse struct {
 	ServerTime               time.Time `json:"server_time"`
 }
 
+// Command is a claimed unit of work (deploy or rollback) with a self-contained
+// payload. ClaimToken must be echoed back on result submission.
+type Command struct {
+	ID           string        `json:"id"`
+	DeploymentID string        `json:"deployment_id"`
+	Kind         string        `json:"kind"`
+	Payload      DeployPayload `json:"payload"`
+	ClaimToken   string        `json:"claim_token"`
+}
+
+// DeployPayload is the self-contained deployment spec (spec §15: the agent
+// never queries the control plane for context).
+type DeployPayload struct {
+	DeploymentID string  `json:"deployment_id"`
+	Kind         string  `json:"kind"`
+	CommitSHA    string  `json:"commit_sha"`
+	App          AppSpec `json:"app"`
+}
+
+// AppSpec describes the application to deploy.
+type AppSpec struct {
+	Name           string  `json:"name"`
+	RepositoryURL  string  `json:"repository_url"`
+	Branch         string  `json:"branch"`
+	AppPath        string  `json:"app_path"`
+	Port           int     `json:"port"`
+	HealthcheckURL string  `json:"healthcheck_url"`
+	ContainerBase  string  `json:"container_base"`
+	CPULimit       *string `json:"cpu_limit,omitempty"`
+	MemoryLimit    *string `json:"memory_limit,omitempty"`
+}
+
+// CommandResult closes out a claimed command.
+type CommandResult struct {
+	ClaimToken string `json:"claim_token"`
+	Succeeded  bool   `json:"succeeded"`
+	Error      string `json:"error,omitempty"`
+}
+
+// CommandResultRead is the server's acknowledgement.
+type CommandResultRead struct {
+	CommandID string `json:"command_id"`
+	Status    string `json:"status"`
+}
+
+// Event is one deployment progress report (spec §25 event vocabulary).
+type Event struct {
+	DeploymentID string   `json:"deployment_id"`
+	Type         string   `json:"type"`
+	Stage        string   `json:"stage,omitempty"`
+	Stream       string   `json:"stream,omitempty"`
+	Line         string   `json:"line,omitempty"`
+	Lines        []string `json:"lines,omitempty"`
+	StatusCode   int      `json:"status_code,omitempty"`
+	CommitSHA    string   `json:"commit_sha,omitempty"`
+	DurationSec  int      `json:"duration_seconds,omitempty"`
+	Error        string   `json:"error,omitempty"`
+}
+
+// EventBatchRead reports how many events the control plane applied.
+type EventBatchRead struct {
+	Accepted int `json:"accepted"`
+}
+
 // Client talks to one control plane over outbound HTTPS (or HTTP in dev).
 type Client struct {
 	BaseURL string
@@ -94,6 +158,35 @@ func (c *Client) Heartbeat(ctx context.Context, agentID, agentToken string, payl
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ClaimCommand claims the agent's oldest queued command; ok is false when the
+// queue is empty.
+func (c *Client) ClaimCommand(ctx context.Context, agentID, agentToken string) (*Command, bool, error) {
+	path := fmt.Sprintf("/api/v1/agents/%s/commands", agentID)
+	var out []Command
+	if err := c.call(ctx, http.MethodGet, path, agentToken, nil, &out); err != nil {
+		return nil, false, err
+	}
+	if len(out) == 0 {
+		return nil, false, nil
+	}
+	return &out[0], true, nil
+}
+
+// PostCommandResult closes out a claimed command.
+func (c *Client) PostCommandResult(ctx context.Context, agentID, agentToken, commandID string, result CommandResult) error {
+	path := fmt.Sprintf("/api/v1/agents/%s/commands/%s/result", agentID, commandID)
+	var out CommandResultRead
+	return c.call(ctx, http.MethodPost, path, agentToken, result, &out)
+}
+
+// PostEvents submits a batch of deployment events; failures are non-fatal for
+// the caller (events are progress reporting, not control flow).
+func (c *Client) PostEvents(ctx context.Context, agentID, agentToken string, events []Event) error {
+	path := fmt.Sprintf("/api/v1/agents/%s/events", agentID)
+	var out EventBatchRead
+	return c.call(ctx, http.MethodPost, path, agentToken, map[string]any{"events": events}, &out)
 }
 
 // call performs one authenticated JSON request and decodes the response.

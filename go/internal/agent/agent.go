@@ -18,6 +18,10 @@ var Version = "dev"
 
 const defaultHeartbeatIntervalSeconds = 30
 
+// commandPollInterval is how often the agent asks for queued work. Deploy
+// latency is bounded by this interval; 5s keeps push-to-deploy snappy.
+const commandPollInterval = 5 * time.Second
+
 // Register exchanges a control-plane registration token for a persistent
 // agent token and stores the resulting state.
 func Register(ctx context.Context, controlPlaneURL, registrationToken, name string) (*config.State, error) {
@@ -47,8 +51,9 @@ func Register(ctx context.Context, controlPlaneURL, registrationToken, name stri
 	return state, nil
 }
 
-// Run starts the heartbeat loop. It blocks until the context is cancelled or
-// the control plane revokes the agent (409), which is unrecoverable by design.
+// Run starts the heartbeat loop and the command-polling worker. It blocks
+// until the context is cancelled or the control plane revokes the agent
+// (409), which is unrecoverable by design.
 func Run(ctx context.Context, log *slog.Logger) error {
 	state, err := config.Load()
 	if err != nil {
@@ -61,6 +66,13 @@ func Run(ctx context.Context, log *slog.Logger) error {
 	log.Info("agent running", "agent_id", state.AgentID, "control_plane", state.ControlPlaneURL, "interval", interval)
 
 	api := client.New(state.ControlPlaneURL)
+
+	// Command worker: claims and executes deployments serially (one deploy at
+	// a time per host; the control plane enforces the same invariant per app).
+	commandCtx, stopCommands := context.WithCancel(ctx)
+	defer stopCommands()
+	go pollCommands(commandCtx, log, api, state)
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -101,6 +113,35 @@ func Run(ctx context.Context, log *slog.Logger) error {
 				// Transient failures are logged and retried next tick; the
 				// control plane simply derives "offline" until we return.
 				log.Warn("heartbeat failed", "error", err)
+			}
+		}
+	}
+}
+
+// pollCommands claims and executes commands forever until the context dies.
+// Deploy failures do not kill the worker: the result is reported and the next
+// poll continues.
+func pollCommands(ctx context.Context, log *slog.Logger, api *client.Client, state *config.State) {
+	pollInterval := commandPollInterval
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cmd, ok, err := api.ClaimCommand(ctx, state.AgentID, state.AgentToken)
+			if err != nil {
+				log.Warn("command poll failed", "error", err)
+				continue
+			}
+			if !ok {
+				continue
+			}
+			log.Info("executing command", "command_id", cmd.ID, "kind", cmd.Kind, "deployment", cmd.Payload.DeploymentID)
+			if err := executeCommand(ctx, log, api, state, cmd); err != nil {
+				log.Error("command failed", "command_id", cmd.ID, "error", err)
 			}
 		}
 	}

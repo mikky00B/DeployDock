@@ -142,12 +142,20 @@ compromise or credential hygiene.
 - The control plane writes audit log entries for `agent.registered` and
   `agent.token_rotated`. Heartbeats are not audited (they would flood the log).
 
-## Phase 3 extension points (reserved, not implemented yet)
+## Phase 3 extension points (implemented)
 
-- `GET /api/v1/agents/{agent_id}/commands` — agent polls for queued commands
-  (`DEPLOY`, `ROLLBACK`, `RESTART`, `GET_STATUS`, `GET_LOGS`, `HEALTH_CHECK`).
-- `POST /api/v1/agents/{agent_id}/events` — agent posts
-  `DEPLOYMENT_STARTED`, `STAGE_STARTED`, `LOG`, `STAGE_COMPLETED`,
-  `HEALTH_CHECK_PASSED/FAILED`, `DEPLOYMENT_COMPLETED/FAILED` events, which the
-  control plane writes into the existing `deployment_logs` table and SSE stream.
-- Command payloads carry an idempotency key so a retried poll cannot double-execute.
+- `GET /api/v1/agents/{agent_id}/commands` — claims the agent's oldest queued
+  command (one at a time; empty list when idle). The payload is self-contained:
+  deployment id, kind (`deploy`/`rollback`), target commit, and the app spec
+  (repository, branch, path, container port, health path, container base,
+  resource limits).
+- `POST /api/v1/agents/{agent_id}/commands/{command_id}/result` — closes the
+  command out; the claim token minted at claim time must be echoed back.
+- `POST /api/v1/agents/{agent_id}/events` — batches of
+  `deployment_started`, `stage_started`, `stage_completed`, `log`,
+  `health_check_passed`/`health_check_failed`, `deployment_completed`,
+  `deployment_failed`. The control plane writes these into `deployment_logs`,
+  advances the 12-value deployment status, and wakes the SSE stream; terminal
+  statuses are never overwritten (a cancel always wins over a racing result).
+- Idempotency: one in-flight command per agent; a stale claim token is
+  rejected with 409.
