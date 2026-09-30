@@ -38,6 +38,9 @@ async def create_app(
         deploy_command=payload.deploy_command,
         restart_command=payload.restart_command,
         healthcheck_url=payload.healthcheck_url,
+        port=payload.port,
+        cpu_limit=payload.cpu_limit,
+        memory_limit=payload.memory_limit,
     )
     session.add(app)
     await session.flush()

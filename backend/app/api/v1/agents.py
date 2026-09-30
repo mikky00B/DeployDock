@@ -11,6 +11,11 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
 from app.models import Agent, User
 from app.schemas.agent import (
+    AgentCommandRead,
+    AgentCommandResult,
+    AgentCommandResultRead,
+    AgentEventBatch,
+    AgentEventBatchRead,
     AgentHeartbeat,
     AgentHeartbeatRead,
     AgentRead,
@@ -20,6 +25,8 @@ from app.schemas.agent import (
     AgentRegistrationTokenRead,
     AgentTokenRotateRead,
 )
+from app.services.agent_dispatch import claim_next_command, complete_command
+from app.services.agent_event_ingestion import EventRejected, ingest_event
 from app.services.agent_service import (
     create_registration_token,
     get_agent_by_token,
@@ -49,7 +56,11 @@ async def get_current_agent(
     return await get_agent_by_token(session, token=credentials.credentials)
 
 
-@router.post("/registration-tokens", response_model=AgentRegistrationTokenRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/registration-tokens",
+    response_model=AgentRegistrationTokenRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_registration_token_endpoint(
     payload: AgentRegistrationTokenCreate,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -160,3 +171,87 @@ async def rotate_token(
         agent_token=new_token,
         heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
     )
+
+
+@router.get("/{agent_id}/commands", response_model=list[AgentCommandRead])
+async def next_commands(
+    agent_id: uuid.UUID,
+    agent: Annotated[Agent, Depends(get_current_agent)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> list[AgentCommandRead]:
+    """Claim the agent's oldest queued command, if any.
+
+    Returns a one-element list (or empty): a claim is atomic per call, and one
+    in-flight command per agent keeps deployments serialized on the host.
+    """
+    if agent.id != agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Agent token does not belong to this agent",
+        )
+    claimed = await claim_next_command(session, agent=agent)
+    if claimed is None:
+        return []
+    command, claim_token = claimed
+    return [
+        AgentCommandRead(
+            id=command.id,
+            deployment_id=command.deployment_id,
+            kind=command.kind.value,
+            payload=command.payload,
+            claim_token=claim_token,
+        )
+    ]
+
+
+@router.post("/{agent_id}/commands/{command_id}/result", response_model=AgentCommandResultRead)
+async def command_result(
+    agent_id: uuid.UUID,
+    command_id: uuid.UUID,
+    payload: AgentCommandResult,
+    agent: Annotated[Agent, Depends(get_current_agent)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AgentCommandResultRead:
+    if agent.id != agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Agent token does not belong to this agent",
+        )
+    command = await complete_command(
+        session,
+        agent=agent,
+        command_id=command_id,
+        claim_token=payload.claim_token,
+        succeeded=payload.succeeded,
+        error_message=payload.error,
+    )
+    if command is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Command is not claimable by this agent (unknown id, wrong token, or already closed)",
+        )
+    return AgentCommandResultRead(command_id=command.id, status=command.status.value)
+
+
+@router.post("/{agent_id}/events", response_model=AgentEventBatchRead)
+async def agent_events(
+    agent_id: uuid.UUID,
+    payload: AgentEventBatch,
+    agent: Annotated[Agent, Depends(get_current_agent)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AgentEventBatchRead:
+    if agent.id != agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Agent token does not belong to this agent",
+        )
+    accepted = 0
+    for event in payload.events:
+        try:
+            await ingest_event(session, agent=agent, event=event)
+        except EventRejected as exc:
+            # One bad event must not sink the batch; the agent's remaining
+            # events stay applicable. Rejections are visible in the response.
+            continue
+        accepted += 1
+    return AgentEventBatchRead(accepted=accepted)

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { getDeployment, listAppDeployments, triggerDeployment, triggerRollback } from "../api/deployments";
+import { cancelDeployment, getDeployment, listAppDeployments, triggerDeployment, triggerRollback } from "../api/deployments";
 import { listApps } from "../api/apps";
 import { CodeValue, EmptyState, formatDateTime, formatDuration, humanizeToken, shortSha, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 import { useDeploymentStream } from "../hooks/useDeploymentStream";
 import { navigateTo } from "../routes";
+import { ACTIVE_DEPLOYMENT_STATUSES } from "../types/deployment";
 import type { Deployment, DeploymentDetail, DeploymentLog, DeploymentStatus } from "../types/deployment";
 import type { DeployableApp } from "../types/app";
 
@@ -58,8 +59,9 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
   const [isLoading, setIsLoading] = useState(true);
   const [isRollingBack, setIsRollingBack] = useState(false);
   const [isRedeploying, setIsRedeploying] = useState(false);
+  const [isCanceling, setIsCanceling] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
-  const isRunning = deployment?.status === "pending" || deployment?.status === "running";
+  const isRunning = isDeploymentActive(deployment?.status);
   const stream = useDeploymentStream(token, deploymentId, Boolean(isRunning));
   const logs = stream.logs.length > 0 ? stream.logs : deployment?.logs ?? [];
   const displayStatus = stream.status ?? deployment?.status ?? null;
@@ -123,6 +125,27 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
     }
   }
 
+  async function handleCancel() {
+    if (!token || !deployment) return;
+    const confirmed = window.confirm(
+      "Cancel this deployment? The current command may still finish on the server, but its result will be discarded.",
+    );
+    if (!confirmed) return;
+    setNotice(null);
+    setError(null);
+    setIsCanceling(true);
+    try {
+      const canceledDeployment = await cancelDeployment(token, deployment.id);
+      // The cancel response carries no logs; keep the ones already loaded.
+      setDeployment({ ...canceledDeployment, logs: deployment.logs });
+      setNotice("Deployment canceled");
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "Could not cancel deployment");
+    } finally {
+      setIsCanceling(false);
+    }
+  }
+
   async function handleCopyLogs() {
     const text = logs.map((log) => `[${log.stream}] ${log.line}`).join("\n");
     await navigator.clipboard?.writeText(text);
@@ -154,6 +177,13 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
         {notice ? <p className="success-message">{notice}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}
         {stream.error ? <p className="form-error">{stream.error}</p> : null}
+        {isRunning ? (
+          <div className="row-actions">
+            <button className="danger-button" type="button" disabled={isCanceling} onClick={() => void handleCancel()}>
+              {isCanceling ? "Canceling..." : "Cancel deployment"}
+            </button>
+          </div>
+        ) : null}
         <dl className="detail-list">
           <div><dt>App</dt><dd>{appName ?? deployment.app_id}</dd></div>
           <div><dt>Kind</dt><dd>{humanizeToken(deployment.kind)}</dd></div>
@@ -273,8 +303,12 @@ export function DeploymentLogViewer({ logs }: { logs: DeploymentLog[] }) {
 export function deploymentStatusTone(status: DeploymentStatus) {
   if (status === "success") return "success";
   if (status === "failed" || status === "canceled") return "danger";
-  if (status === "running" || status === "pending") return "warning";
+  if (ACTIVE_DEPLOYMENT_STATUSES.includes(status)) return "warning";
   return "neutral";
+}
+
+export function isDeploymentActive(status: DeploymentStatus | null | undefined) {
+  return status !== null && status !== undefined && ACTIVE_DEPLOYMENT_STATUSES.includes(status);
 }
 
 async function loadDeployments(token: string) {

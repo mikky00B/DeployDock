@@ -16,6 +16,7 @@ class DeploymentRead(BaseModel):
     kind: DeploymentKind
     commit_sha: str | None
     previous_commit_sha: str | None
+    commit_message: str | None = None
     started_at: datetime | None
     finished_at: datetime | None
     duration_seconds: int | None
@@ -30,3 +31,8 @@ class DeploymentRead(BaseModel):
 
 class DeploymentDetailRead(DeploymentRead):
     logs: list[DeploymentLogRead] = []
+    # Health-check result reported by the agent engine (spec §18).
+    healthcheck_url: str | None = None
+    healthcheck_status_code: int | None = None
+    healthcheck_ok: bool | None = None
+    healthcheck_error: str | None = None

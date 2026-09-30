@@ -11,6 +11,7 @@ const navItems: Array<{ route: AppRoute; label: string }> = [
   { route: "/servers", label: "Servers" },
   { route: "/apps", label: "Apps" },
   { route: "/deployments", label: "Deployments" },
+  { route: "/docs", label: "Guide" },
 ];
 
 export function AppShell({ activeRoute, children }: AppShellProps) {
@@ -62,5 +63,6 @@ function routeTitle(route: AppRoute) {
   if (route === "/servers") return "Servers";
   if (route === "/apps") return "Apps";
   if (route === "/deployments") return "Deployments";
+  if (route === "/docs") return "Guide";
   return "Dashboard";
 }

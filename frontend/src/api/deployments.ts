@@ -20,3 +20,7 @@ export function getDeploymentLogs(token: string, deploymentId: string) {
 export function triggerRollback(token: string, deploymentId: string) {
   return apiClient.request<Deployment>(`/api/v1/deployments/${deploymentId}/rollback`, { method: "POST", token });
 }
+
+export function cancelDeployment(token: string, deploymentId: string) {
+  return apiClient.request<Deployment>(`/api/v1/deployments/${deploymentId}/cancel`, { method: "POST", token });
+}

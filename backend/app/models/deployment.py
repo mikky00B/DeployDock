@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Uuid
 
@@ -11,11 +11,53 @@ from app.models.base import TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class DeploymentStatus(str, enum.Enum):
+    """Lifecycle of a deployment (spec §13).
+
+    The pipeline states between ``pending`` and ``success``/``failed`` become
+    active as the agent-driven engine (Phase 3) reports stage events; the SSH
+    bridge runner only uses ``pending``/``running`` for now.
+    """
+
     pending = "pending"
+    queued = "queued"
+    cloning = "cloning"
+    building = "building"
+    testing = "testing"
+    deploying = "deploying"
+    health_check = "health_check"
     running = "running"
     success = "success"
     failed = "failed"
     canceled = "canceled"
+    rolled_back = "rolled_back"
+
+
+# Canonical status groups. Kept next to the enum so the concurrency guard,
+# the SSE stream, and the orphan sweep cannot drift apart.
+ACTIVE_DEPLOYMENT_STATUSES = (
+    DeploymentStatus.pending,
+    DeploymentStatus.queued,
+    DeploymentStatus.cloning,
+    DeploymentStatus.building,
+    DeploymentStatus.testing,
+    DeploymentStatus.deploying,
+    DeploymentStatus.health_check,
+    DeploymentStatus.running,
+)
+
+TERMINAL_DEPLOYMENT_STATUSES = (
+    DeploymentStatus.success,
+    DeploymentStatus.failed,
+    DeploymentStatus.canceled,
+    DeploymentStatus.rolled_back,
+)
+
+# Active statuses that occupy the one-deployment-per-app slot proper. `queued`
+# is active (it blocks nothing else from queueing) but exempt from the guard:
+# queued rows exist precisely to wait for one of these to finish (spec §42).
+DISPATCHABLE_DEPLOYMENT_STATUSES = tuple(
+    status for status in ACTIVE_DEPLOYMENT_STATUSES if status is not DeploymentStatus.queued
+)
 
 
 class DeploymentKind(str, enum.Enum):
@@ -69,12 +111,20 @@ class Deployment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     commit_sha: Mapped[str | None] = mapped_column(String(64))
     previous_commit_sha: Mapped[str | None] = mapped_column(String(64))
+    # Head commit message when the deploy was triggered by a webhook (spec §73).
+    commit_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_seconds: Mapped[int | None] = mapped_column(Integer)
     triggered_by: Mapped[str | None] = mapped_column(String(120))
     exit_code: Mapped[int | None] = mapped_column(Integer)
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Health-check result reported by the agent engine (spec §18). A deployment
+    # only becomes success after its health check passed.
+    healthcheck_url: Mapped[str | None] = mapped_column(String(500))
+    healthcheck_status_code: Mapped[int | None] = mapped_column(Integer)
+    healthcheck_ok: Mapped[bool | None] = mapped_column(Boolean)
+    healthcheck_error: Mapped[str | None] = mapped_column(Text)
 
     owner = relationship("User", back_populates="deployments")
     app = relationship("App", back_populates="deployments")

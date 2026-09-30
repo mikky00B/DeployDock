@@ -1,4 +1,8 @@
-const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+// Empty default = same-origin requests. In dev, Vite's proxy forwards /api to
+// the backend (see vite.config.ts); behind a reverse proxy, /api lands on the
+// API host. Set VITE_API_BASE_URL to an absolute URL when the API lives on a
+// different origin (this is what the Docker build does).
+const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 const baseUrl = configuredBaseUrl.replace(/\/+$/, "");
 
 type RequestOptions = Omit<RequestInit, "body"> & {
@@ -24,7 +28,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   } catch (error) {
     if (error instanceof TypeError) {
       throw new Error(
-        `Could not reach the API at ${baseUrl}. Check that the backend is running and CORS allows this frontend.`,
+        `Could not reach the API at ${baseUrl || "the same origin (proxied)"}. ` +
+          "Check that the backend is running" +
+          (baseUrl ? " and CORS allows this frontend" : " (the dev proxy targets http://127.0.0.1:8000)") +
+          ".",
         { cause: error },
       );
     }

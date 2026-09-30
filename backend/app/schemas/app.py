@@ -13,6 +13,11 @@ class AppBase(BaseModel):
     deploy_command: str = Field(min_length=1)
     restart_command: str | None = Field(default=None, min_length=1)
     healthcheck_url: str | None = Field(default=None, min_length=1, max_length=500)
+    # TCP port the app listens on inside its container (agent-driven deploys).
+    port: int | None = Field(default=None, ge=1, le=65535)
+    # Container resource limits applied by the agent (spec §50), e.g. "1.5" and "512m".
+    cpu_limit: str | None = Field(default=None, min_length=1, max_length=32)
+    memory_limit: str | None = Field(default=None, min_length=1, max_length=32)
 
     @field_validator("deploy_command")
     @classmethod
@@ -43,6 +48,9 @@ class AppUpdate(BaseModel):
     deploy_command: str | None = Field(default=None, min_length=1)
     restart_command: str | None = Field(default=None, min_length=1)
     healthcheck_url: str | None = Field(default=None, min_length=1, max_length=500)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    cpu_limit: str | None = Field(default=None, min_length=1, max_length=32)
+    memory_limit: str | None = Field(default=None, min_length=1, max_length=32)
 
     @field_validator("deploy_command")
     @classmethod
@@ -71,6 +79,9 @@ class AppRead(BaseModel):
     deploy_command: str
     restart_command: str | None
     healthcheck_url: str | None
+    port: int | None
+    cpu_limit: str | None
+    memory_limit: str | None
     current_commit: str | None
     last_successful_commit: str | None
     created_at: datetime

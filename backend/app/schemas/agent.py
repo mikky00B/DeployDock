@@ -60,3 +60,32 @@ class AgentRead(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AgentCommandRead(BaseModel):
+    id: uuid.UUID
+    deployment_id: uuid.UUID
+    kind: str
+    payload: dict
+    claim_token: str
+
+
+class AgentCommandResult(BaseModel):
+    claim_token: str
+    succeeded: bool
+    error: str | None = None
+
+
+class AgentCommandResultRead(BaseModel):
+    command_id: uuid.UUID
+    status: str
+
+
+class AgentEventBatch(BaseModel):
+    events: list[dict]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AgentEventBatchRead(BaseModel):
+    accepted: int

@@ -6,14 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import Deployment, DeploymentLog
+from app.models.deployment import TERMINAL_DEPLOYMENT_STATUSES as _TERMINAL_STATUSES
 from app.models.deployment import DeploymentStatus
 from app.services.deployment_events import deployment_event_bus
 
-TERMINAL_DEPLOYMENT_STATUSES = {
-    DeploymentStatus.success,
-    DeploymentStatus.failed,
-    DeploymentStatus.canceled,
-}
+TERMINAL_DEPLOYMENT_STATUSES: frozenset[DeploymentStatus] = frozenset(_TERMINAL_STATUSES)
 
 # How long a stream waits for a notification before checking the database anyway.
 # Also the heartbeat interval, which keeps proxies from closing an idle connection.

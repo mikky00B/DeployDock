@@ -9,9 +9,12 @@ from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session, get_sessionmaker
 from app.models import User
+from app.models.deployment import DeploymentStatus
 from app.schemas.deployment import DeploymentDetailRead, DeploymentRead
 from app.schemas.deployment_log import DeploymentLogRead
+from app.services.agent_dispatch import dispatch_deployment, promote_next_queued_deployment
 from app.services.deployment_service import (
+    cancel_deployment,
     create_deployment,
     create_rollback_deployment,
     get_deployment_for_user,
@@ -42,7 +45,13 @@ async def deploy_app(
     runner: Annotated[DeploymentRunner, Depends(get_deployment_runner)],
 ) -> DeploymentRead:
     deployment = await create_deployment(session, app_id=app_id, current_user=current_user)
-    background_tasks.add_task(runner.run, deployment.id)
+    # Agent path first (spec §15); the SSH bridge runner is the fallback while
+    # the agent fleet rolls out. Queued deployments (spec §42) wait here — the
+    # promotion paths dispatch them once the active deployment turns terminal.
+    if deployment.status is DeploymentStatus.pending:
+        dispatched = await dispatch_deployment(session, deployment=deployment)
+        if not dispatched:
+            background_tasks.add_task(runner.run, deployment.id)
     return DeploymentRead.model_validate(deployment)
 
 
@@ -78,6 +87,33 @@ async def deployment_logs(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[DeploymentLogRead]:
     return await list_deployment_logs(session, deployment_id=deployment_id, current_user=current_user)
+
+
+@router.post(
+    "/deployments/{deployment_id}/cancel",
+    response_model=DeploymentRead,
+)
+async def cancel_deployment_endpoint(
+    deployment_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    runner: Annotated[DeploymentRunner, Depends(get_deployment_runner)],
+) -> DeploymentRead:
+    """Cancel a non-terminal deployment (spec §46).
+
+    The runner honours this at its next checkpoint; the SSH bridge cannot abort
+    a command that is already executing on the server.
+    """
+    deployment = await cancel_deployment(session, deployment_id=deployment_id, current_user=current_user)
+    # A canceled deployment frees the one-active slot: promote (spec §42) and
+    # dispatch whatever was waiting behind it.
+    promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
+    if promoted is not None:
+        dispatched = await dispatch_deployment(session, deployment=promoted)
+        if not dispatched:
+            background_tasks.add_task(runner.run, promoted.id)
+    return DeploymentRead.model_validate(deployment)
 
 
 @router.get("/deployments/{deployment_id}/stream")
@@ -116,5 +152,8 @@ async def rollback_deployment(
         deployment_id=deployment_id,
         current_user=current_user,
     )
-    background_tasks.add_task(runner.run_rollback, rollback_record.id)
+    if rollback_record.status is DeploymentStatus.pending:
+        dispatched = await dispatch_deployment(session, deployment=rollback_record)
+        if not dispatched:
+            background_tasks.add_task(runner.run_rollback, rollback_record.id)
     return DeploymentRead.model_validate(rollback_record)

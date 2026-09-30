@@ -41,6 +41,11 @@ def test_core_tables_are_registered() -> None:
         "audit_logs",
         "agents",
         "agent_registration_tokens",
+        "deployment_commands",
+        "environments",
+        "environment_variables",
+        "domains",
+        "webhook_deliveries",
     }
 
 

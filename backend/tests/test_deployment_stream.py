@@ -96,6 +96,61 @@ async def test_stream_replays_existing_logs_then_terminates(session_factory) -> 
     assert '"status":"success"' in events[-1]
 
 
+async def test_stream_terminates_on_rolled_back_status(session_factory) -> None:
+    """rolled_back is terminal: it ends the stream instead of polling forever."""
+    async with session_factory() as session:
+        deployment = await seed_deployment(session, status=DeploymentStatus.rolled_back)
+        add_log(session, deployment, "rolled back", 1)
+        await session.commit()
+
+    events = [
+        event
+        async for event in stream_deployment_events(
+            sessionmaker=session_factory,
+            deployment_id=deployment.id,
+            owner_id=deployment.owner_id,
+        )
+    ]
+
+    assert '"status":"rolled_back"' in events[-1]
+
+
+async def test_stream_terminates_for_rolled_back_deployments(session_factory) -> None:
+    """rolled_back became a terminal status with the Phase 3 state machine."""
+    async with session_factory() as session:
+        deployment = await seed_deployment(session, status=DeploymentStatus.rolled_back)
+
+    events = [
+        event
+        async for event in stream_deployment_events(
+            sessionmaker=session_factory,
+            deployment_id=deployment.id,
+            owner_id=deployment.owner_id,
+        )
+    ]
+
+    assert events == [format_sse("status", {"status": "rolled_back"})]
+
+
+async def test_stream_terminates_for_canceled_deployments(session_factory) -> None:
+    async with session_factory() as session:
+        deployment = await seed_deployment(session, status=DeploymentStatus.canceled)
+        add_log(session, deployment, "canceling", 1)
+        await session.commit()
+
+    events = [
+        event
+        async for event in stream_deployment_events(
+            sessionmaker=session_factory,
+            deployment_id=deployment.id,
+            owner_id=deployment.owner_id,
+        )
+    ]
+
+    assert "canceling" in events[0]
+    assert '"status":"canceled"' in events[-1]
+
+
 async def test_stream_reports_not_found_for_another_owner(session_factory) -> None:
     async with session_factory() as session:
         deployment = await seed_deployment(session)
