@@ -83,11 +83,14 @@ during a long deploy could mark a live one as failed.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VITE_API_BASE_URL` | `http://127.0.0.1:8000` | API origin |
+| `VITE_API_BASE_URL` | *(unset — same origin)* | API origin when it differs from the dashboard's |
 
-Vite inlines this at build time. For containers it is a build argument
-(`docker compose build --build-arg VITE_API_BASE_URL=...`), not a runtime
-setting.
+Unset, the dashboard calls `/api/...` on its own origin: Vite's dev server
+proxies those to `http://127.0.0.1:8000` (see `frontend/vite.config.ts`), and in
+production nginx can do the same. Set an absolute URL only when the API lives on
+a different origin. Vite inlines this at build time. For containers it is a
+build argument (`docker compose build --build-arg VITE_API_BASE_URL=...`), not a
+runtime setting.
 
 ## Production guardrails
 

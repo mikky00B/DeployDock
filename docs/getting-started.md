@@ -78,9 +78,11 @@ cp .env.example .env
 npm run dev
 ```
 
-The dashboard runs on <http://127.0.0.1:5173> and talks to the API at
-`VITE_API_BASE_URL`. That value is read at build time, so changing it requires
-a restart of `npm run dev` (or a rebuild for production).
+The dashboard runs on <http://127.0.0.1:5173>. Leave `VITE_API_BASE_URL` unset
+in development: API calls go to the dashboard origin itself and Vite proxies
+`/api` to `http://127.0.0.1:8000`, so no CORS is involved. The value is read at
+build time, so setting or changing it requires a restart of `npm run dev` (or a
+rebuild for production).
 
 ## First run
 
