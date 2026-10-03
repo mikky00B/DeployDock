@@ -177,3 +177,5 @@ Full detail, including the known gaps, is in [docs/security.md](docs/security.md
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+<!-- CI workflow validation trigger -->
