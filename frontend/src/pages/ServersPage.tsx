@@ -1,4 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useState, type FormEvent } from "react";
+
+import { createAgentRegistrationToken } from "../api/agents";
+import { apiClient } from "../api/client";
 
 import {
   createServer,
@@ -33,6 +36,19 @@ export function ServersPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [testingServerId, setTestingServerId] = useState<string | null>(null);
+  const [agentToken, setAgentToken] = useState<{ serverId: string; token: string } | null>(null);
+
+  async function handleMintAgentToken(serverId: string) {
+    if (!token) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const minted = await createAgentRegistrationToken(token, serverId);
+      setAgentToken({ serverId, token: minted.token });
+    } catch (tokenError) {
+      setError(tokenError instanceof Error ? tokenError.message : "Could not mint an agent registration token");
+    }
+  }
 
   useEffect(() => {
     if (!token) return;
@@ -115,31 +131,41 @@ export function ServersPage() {
         ) : null}
         <div className="resource-list">
           {servers.map((server) => (
-            <article className="resource-row" key={server.id}>
-              <div>
-                <button className="link-button title-link" type="button" onClick={() => navigateTo(`/servers/${server.id}`)}>
-                  {server.name}
-                </button>
-                <p>{server.username}@{server.host}:{server.port}</p>
-                {server.known_host_key_fingerprint ? null : (
-                  <p className="field-helper">Host key not pinned - test the connection to pin it.</p>
-                )}
-              </div>
-              <StatusBadge label={server.status} tone={serverStatusTone(server.status)} />
-              <div className="row-actions">
-                <button
-                  className="secondary-button"
-                  disabled={testingServerId === server.id}
-                  type="button"
-                  onClick={() => void handleTest(server.id)}
-                >
-                  {testingServerId === server.id ? "Testing" : "Test"}
-                </button>
-                <button className="danger-button" type="button" onClick={() => void handleDelete(server.id)}>
-                  Delete
-                </button>
-              </div>
-            </article>
+            <Fragment key={server.id}>
+              <article className="resource-row">
+                <div>
+                  <button className="link-button title-link" type="button" onClick={() => navigateTo(`/servers/${server.id}`)}>
+                    {server.name}
+                  </button>
+                  <p>{server.username}@{server.host}:{server.port}</p>
+                  {server.known_host_key_fingerprint ? null : (
+                    <p className="field-helper">Host key not pinned - test the connection to pin it.</p>
+                  )}
+                </div>
+                <StatusBadge label={server.status} tone={serverStatusTone(server.status)} />
+                <div className="row-actions">
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => void handleMintAgentToken(server.id)}
+                  >
+                    Agent
+                  </button>
+                  <button
+                    className="secondary-button"
+                    disabled={testingServerId === server.id}
+                    type="button"
+                    onClick={() => void handleTest(server.id)}
+                  >
+                    {testingServerId === server.id ? "Testing" : "Test"}
+                  </button>
+                  <button className="danger-button" type="button" onClick={() => void handleDelete(server.id)}>
+                    Delete
+                  </button>
+                </div>
+              </article>
+              {agentToken?.serverId === server.id ? <AgentTokenPanel token={agentToken.token} /> : null}
+            </Fragment>
           ))}
         </div>
       </section>
@@ -416,6 +442,44 @@ function PublicKeyBlock({ publicKey }: { publicKey: string }) {
         Copy
       </button>
     </div>
+  );
+}
+
+function AgentTokenPanel({ token }: { token: string }) {
+  const command = `sudo ./deploydock-agent register --server ${apiClient.baseUrl || window.location.origin} --token ${token}`;
+  const [copied, setCopied] = useState<string | null>(null);
+
+  async function copy(value: string, label: string) {
+    await navigator.clipboard?.writeText(value);
+    setCopied(label);
+    window.setTimeout(() => setCopied(null), 1500);
+  }
+
+  return (
+    <section className="key-panel" aria-label="Agent registration token">
+      <h3>Register an agent on this server</h3>
+      <p>
+        One-time token, expires in 15 minutes. Build <code className="inline-code">deploydock-agent</code> from the
+        repository (<code className="inline-code">go build -o deploydock-agent ./go/cmd/deploydock-agent</code>), copy
+        it to the server, then run:
+      </p>
+      <div className="public-key-block">
+        <code>{token}</code>
+        <button className="secondary-button" type="button" onClick={() => void copy(token, "token")}>
+          {copied === "token" ? "Copied" : "Copy token"}
+        </button>
+      </div>
+      <pre className="command-snippet">
+        <code>{command}</code>
+      </pre>
+      <button className="secondary-button" type="button" onClick={() => void copy(command, "command")}>
+        {copied === "command" ? "Copied" : "Copy command"}
+      </button>
+      <p className="field-helper">
+        Adjust --server if this DeployDock URL is not reachable from the server. After registering,{" "}
+        <code className="inline-code">sudo ./deploydock-agent run</code> starts heartbeats and agent-driven deploys.
+      </p>
+    </section>
   );
 }
 

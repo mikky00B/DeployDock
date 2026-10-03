@@ -144,11 +144,11 @@ function GridIcon() {
 }
 
 const FEATURES: Array<{ icon: () => React.ReactNode; title: string; body: string }> = [
-  { icon: AppsIcon, title: "Any VPS, over SSH", body: "Bring your own servers from any provider. Ubuntu, Debian, or anywhere systemd runs." },
-  { icon: BoltIcon, title: "One-click deploys", body: "Trigger from the dashboard, on git push, or via API. Cancel mid-deploy without leaving broken state." },
-  { icon: BarsIcon, title: "Live log streaming", body: "Tail deploy output and app logs in real time. Filter by level, search, and pin failed runs." },
-  { icon: RefreshIcon, title: "Service status & restart", body: "See what's running and what's not. Restart a service, run a health check, or SSH from the panel." },
-  { icon: RollbackIcon, title: "One-click rollback", body: "Every release is a checkpoint. Ship broke? Roll back to the last known-good in seconds." },
+  { icon: AppsIcon, title: "Any VPS, over SSH", body: "Bring your own servers from any provider. Ubuntu, Debian, or anywhere Linux runs." },
+  { icon: BoltIcon, title: "One-click deploys", body: "Trigger from the dashboard, on git push, or via the API. Cancel mid-deploy without leaving broken state." },
+  { icon: BarsIcon, title: "Live log streaming", body: "Tail deploy output and app logs in real time over SSE — from the dashboard or the CLI." },
+  { icon: RefreshIcon, title: "Service status & restart", body: "See what's running and what's not. Restart a service and pull its recent journal logs from the panel." },
+  { icon: RollbackIcon, title: "One-click rollback", body: "Every success is a checkpoint. Ship broke? Roll back to the last known-good release in one click." },
   { icon: GridIcon, title: "Multi-app, multi-server", body: "Group apps by server or environment. Staging on one box, prod on another — one dashboard." },
 ];
 
@@ -163,11 +163,11 @@ const FAQ_ITEMS: Array<[string, string]> = [
   ],
   [
     "Does it need root on my server?",
-    "The agent runs as a non-root user by default. It only escalates when a specific action needs it (e.g. writing a systemd unit), and every escalation is auditable.",
+    "No. Run a regular non-root deploy user and whitelist only the sudo commands it needs, such as systemctl restart. Every command DeployDock runs is captured in the deployment log and the audit trail.",
   ],
   [
     "How does rollback work?",
-    "Every release is a snapshot on disk with its own systemd unit. Rolling back swaps the active symlink and restarts — typically under 3 seconds. Your last N releases are kept (configurable).",
+    "Rollback re-deploys the last successful release as a new deployment. With the agent, it checks out the previous commit, rebuilds the container, and switches traffic only after the new container passes its health check — the old one keeps serving until then.",
   ],
   [
     "Is it really free?",
@@ -222,11 +222,14 @@ const APPS: AppRow[] = [
 
 const FACTS: Array<[string, string]> = [
   ["license", "MIT"],
-  ["runs on", "Linux + systemd"],
-  ["install size", "~ 28 MB"],
-  ["deps", "none (single binary)"],
-  ["telemetry", "off by default"],
+  ["runs on", "any Linux VPS"],
+  ["deploy runtime", "Docker or systemd"],
+  ["control plane", "FastAPI + PostgreSQL"],
+  ["telemetry", "none"],
 ];
+
+const GITHUB_URL = "https://github.com/mikky00B/DeployDock";
+const INSTALL_COMMAND = `git clone ${GITHUB_URL}.git`;
 
 export function LandingPage() {
   const logLines = useHeroLog();
@@ -236,7 +239,7 @@ export function LandingPage() {
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
 
   function copyInstall() {
-    navigator.clipboard?.writeText("curl -sSL deploydock.sh/install | sh").catch(() => {});
+    navigator.clipboard?.writeText(INSTALL_COMMAND).catch(() => {});
     setCopied(true);
     window.clearTimeout(copyTimer.current);
     copyTimer.current = window.setTimeout(() => setCopied(false), 2000);
@@ -255,15 +258,15 @@ export function LandingPage() {
             <a href="#how">How it works</a>
             <a href="#cli">CLI</a>
             <a href="#faq">FAQ</a>
-            <a href="#docs">Docs</a>
+            <a href="/docs">Docs</a>
           </div>
           <div className="nav-cta">
-            <a className="btn btn-ghost btn-sm" href="#github" aria-label="GitHub">
+            <a className="btn btn-ghost btn-sm" href={GITHUB_URL} target="_blank" rel="noreferrer" aria-label="GitHub">
               <GitHubIcon />
               <span>GitHub</span>
             </a>
             <button className="btn btn-primary btn-sm" onClick={() => navigateTo("/login")}>
-              Install
+              Sign in
             </button>
           </div>
         </div>
@@ -274,7 +277,7 @@ export function LandingPage() {
         <div className="wrap hero-grid">
           <div>
             <span className="eyebrow">
-              <span className="dot" /> v0.9 · public beta
+              <span className="dot" /> v2 · open source
             </span>
             <h1 className="headline">
               Deploy to your <em>own servers</em>. Without the yak-shaving.
@@ -285,21 +288,18 @@ export function LandingPage() {
               runtime.
             </p>
             <div className="hero-ctas">
-              <button className="btn btn-primary" onClick={() => navigateTo("/login")}>
+              <button className="btn btn-primary" onClick={() => navigateTo("/docs")}>
                 <DownloadIcon />
                 Install DeployDock
               </button>
-              <a className="btn btn-ghost" href="#github">
+              <a className="btn btn-ghost" href={GITHUB_URL} target="_blank" rel="noreferrer">
                 <GitHubIcon />
                 Star on GitHub
-                <span className="mono" style={{ color: "var(--fg-3)", fontSize: 12, marginLeft: 4 }}>
-                  2.4k
-                </span>
               </a>
             </div>
             <div className="install-line" onClick={copyInstall} role="button" tabIndex={0}>
               <span className="prompt">$</span>
-              <span>curl -sSL deploydock.sh/install | sh</span>
+              <span>{INSTALL_COMMAND}</span>
               <span className="copy">{copied ? "COPIED ✓" : "COPY"}</span>
             </div>
           </div>
@@ -358,7 +358,7 @@ export function LandingPage() {
       </section>
 
       <section className="wrap logos">
-        <div>Trusted by developers self-hosting on</div>
+        <div>Runs on any VPS from</div>
         <div className="logos-row">
           <div className="logo-item">Hetzner</div>
           <div className="logo-item">DigitalOcean</div>
@@ -388,12 +388,12 @@ export function LandingPage() {
                 no reformatting.
               </p>
               <div className="step-visual">
-                <span className="comment"># from the panel</span>
+                <span className="comment"># from the dashboard or CLI</span>
                 <br />
-                <span className="kw">dock</span> server add{" "}
-                <span style={{ color: "var(--fg)" }}>root@nyc-1.vps</span>
+                <span className="kw">deploydock</span> project create{" "}
+                <span style={{ color: "var(--fg)" }}>--name watchdog</span>
                 <br />
-                <span className="comment"># ✓ agent installed in 4.1s</span>
+                <span className="comment"># then install the agent on the VPS</span>
               </div>
             </div>
             <div className="step">
@@ -491,9 +491,9 @@ export function LandingPage() {
                   <h4>Piped log streams</h4>
                   <p>
                     <code className="mono" style={{ color: "var(--fg)" }}>
-                      dock logs web -f
+                      deploydock logs web
                     </code>{" "}
-                    in one pane, deploys running in another. Works over SSH the way you&apos;d expect.
+                    in one pane, deploys running in another. Same API the dashboard uses.
                   </p>
                 </div>
               </div>
@@ -506,9 +506,10 @@ export function LandingPage() {
                   <p>
                     Commit{" "}
                     <code className="mono" style={{ color: "var(--fg)" }}>
-                      dock.yaml
+                      deploydock.yaml
                     </code>{" "}
-                    to your repo. Reproducible setups across servers, branches, and clones.
+                    to your repo. <code className="mono" style={{ color: "var(--fg)" }}>deploydock deploy</code> picks
+                    the project up from the file — reproducible across clones.
                   </p>
                 </div>
               </div>
@@ -525,7 +526,7 @@ export function LandingPage() {
             </div>
             <div className="terminal-body">
               <div>
-                <span className="tprompt">$</span> dock deploy web
+                <span className="tprompt">$</span> deploydock deploy web
               </div>
               <div>
                 <span className="tcomment"># target: nyc-1.vps · branch: main</span>
@@ -547,7 +548,7 @@ export function LandingPage() {
               </div>
               <div>&nbsp;</div>
               <div>
-                <span className="tprompt">$</span> dock logs web -f
+                <span className="tprompt">$</span> deploydock logs web
               </div>
               <div>
                 <span className="tcomment">17:04:12</span> info server listening on :3000
@@ -580,11 +581,11 @@ export function LandingPage() {
                 vendor account holding your infrastructure hostage.
               </p>
               <div style={{ marginTop: 28, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button className="btn btn-primary" onClick={() => navigateTo("/login")}>
+                <button className="btn btn-primary" onClick={() => navigateTo("/docs")}>
                   <DownloadIcon />
                   Install DeployDock
                 </button>
-                <a className="btn btn-ghost" href="#docs">
+                <a className="btn btn-ghost" href="/docs">
                   Read the docs →
                 </a>
               </div>
@@ -616,10 +617,10 @@ export function LandingPage() {
           <h2>Own your deploys.</h2>
           <p>Install DeployDock on any VPS in under 60 seconds. Bring your servers; keep your workflow.</p>
           <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-            <button className="btn btn-primary" onClick={() => navigateTo("/login")}>
+            <button className="btn btn-primary" onClick={() => navigateTo("/docs")}>
               Install DeployDock
             </button>
-            <a className="btn btn-ghost" href="#github">
+            <a className="btn btn-ghost" href={GITHUB_URL} target="_blank" rel="noreferrer">
               View on GitHub
             </a>
           </div>
@@ -645,23 +646,23 @@ export function LandingPage() {
             </div>
             <div className="footer-col">
               <h5>Developers</h5>
-              <a href="#docs">Documentation</a>
-              <a href="#docs">Install guide</a>
-              <a href="#docs">CLI reference</a>
-              <a href="#docs">Changelog</a>
+              <a href="/docs">Documentation</a>
+              <a href="/docs">Install guide</a>
+              <a href="/docs">CLI reference</a>
+              <a href="/docs">Changelog</a>
             </div>
             <div className="footer-col">
               <h5>Community</h5>
-              <a href="#github">GitHub</a>
-              <a href="#discord">Discord</a>
-              <a href="#issues">Issues</a>
-              <a href="#security">Security</a>
+              <a href={GITHUB_URL} target="_blank" rel="noreferrer">GitHub</a>
+              <a href={`${GITHUB_URL}/issues`} target="_blank" rel="noreferrer">Issues</a>
+              <a href={`${GITHUB_URL}/discussions`} target="_blank" rel="noreferrer">Discussions</a>
+              <a href={`${GITHUB_URL}/security`} target="_blank" rel="noreferrer">Security</a>
             </div>
           </div>
         </div>
         <div className="wrap footer-bottom">
           <div>© 2026 DeployDock · MIT License</div>
-          <div>v0.9.2 · git@e0c4d3</div>
+          <div>v2.0.0-dev · self-hosted</div>
         </div>
       </footer>
     </div>

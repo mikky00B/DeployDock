@@ -36,8 +36,8 @@ function RouterView() {
   useEffect(() => {
     if (isLoading) return;
 
-    // The landing page is public — no auth redirect.
-    if (route.route === "/") return;
+    // The landing page and the guide are public — no auth redirect.
+    if (route.route === "/" || route.route === "/docs") return;
 
     if (!user && route.route !== "/login" && route.route !== "/register") {
       navigateTo("/login");
@@ -59,6 +59,28 @@ function RouterView() {
 
   if (route.route === "/") {
     return <LandingPage />;
+  }
+
+  if (route.route === "/docs" && !user) {
+    return (
+      <main style={{ maxWidth: 1080, margin: "0 auto", padding: "32px 24px 64px" }}>
+        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 28 }}>
+          <button
+            className="brand-button"
+            type="button"
+            onClick={() => navigateTo("/")}
+            style={{ margin: 0, width: "auto", textAlign: "left" }}
+          >
+            <span>DeployDock</span>
+            <small>Deployment control panel</small>
+          </button>
+          <button className="primary-inline-button" type="button" onClick={() => navigateTo("/login")}>
+            Sign in
+          </button>
+        </header>
+        <DocsPage />
+      </main>
+    );
   }
 
   if (!user) {
