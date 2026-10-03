@@ -8,6 +8,7 @@ from app.models.deployment_command import (
     DeploymentCommand,
 )
 from app.models.deployment_log import DeploymentLog, DeploymentLogStream
+from app.models.email_verification_code import EmailVerificationCode
 from app.models.environment import (
     Domain,
     DomainStatus,
@@ -35,6 +36,7 @@ __all__ = [
     "DeploymentStatus",
     "Domain",
     "DomainStatus",
+    "EmailVerificationCode",
     "Environment",
     "EnvironmentVariable",
     "SSLStatus",

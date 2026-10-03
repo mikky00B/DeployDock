@@ -1,6 +1,8 @@
 import { apiClient } from "./client";
 import type { AuthResponse, User } from "../types/auth";
 
+export type { AuthResponse };
+
 export type LoginPayload = {
   email: string;
   password: string;
@@ -35,5 +37,19 @@ export function logout(token: string | null) {
   return apiClient.request<{ detail: string }>("/api/v1/auth/logout", {
     method: "POST",
     token,
+  });
+}
+
+export function verifyEmail(payload: { email: string; code: string }) {
+  return apiClient.request<AuthResponse>("/api/v1/auth/verify-email", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function resendVerification(payload: { email: string }) {
+  return apiClient.request<{ detail: string }>("/api/v1/auth/resend-verification", {
+    method: "POST",
+    body: payload,
   });
 }

@@ -46,6 +46,7 @@ def test_core_tables_are_registered() -> None:
         "environment_variables",
         "domains",
         "webhook_deliveries",
+        "email_verification_codes",
     }
 
 

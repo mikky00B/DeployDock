@@ -24,6 +24,18 @@ class TokenResponse(BaseModel):
 class AuthUserResponse(BaseModel):
     user: UserRead
     token: TokenResponse
+    # True when the account must confirm the emailed code before it is usable;
+    # `token` is then empty and the client should collect the code.
+    email_verification_required: bool = False
+
+
+class VerifyEmailRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320, pattern=EMAIL_PATTERN)
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class ResendVerificationRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320, pattern=EMAIL_PATTERN)
 
 
 class LogoutResponse(BaseModel):

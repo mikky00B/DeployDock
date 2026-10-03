@@ -17,6 +17,7 @@ from app.models.deployment import TERMINAL_DEPLOYMENT_STATUSES, DeploymentStatus
 from app.models.deployment_log import DeploymentLogStream
 from app.services.audit_service import create_audit_log
 from app.services.deployment_events import deployment_event_bus
+from app.services.email_service import notify_deployment_result
 from app.services.ssh_service import SSHCommandResult, SSHService
 
 
@@ -177,6 +178,7 @@ class DeploymentRunner:
                 deployment.duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
                 await session.commit()
                 deployment_event_bus.notify(deployment.id)
+                await notify_deployment_result(session, deployment_id=deployment.id)
                 await self._promote_next_queued(session, deployment)
 
     async def run_rollback(self, deployment_id: uuid.UUID) -> None:
@@ -287,6 +289,7 @@ class DeploymentRunner:
                 deployment.duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
                 await session.commit()
                 deployment_event_bus.notify(deployment.id)
+                await notify_deployment_result(session, deployment_id=deployment.id)
                 await self._promote_next_queued(session, deployment)
 
     async def _promote_next_queued(self, session: AsyncSession, deployment: Deployment) -> None:

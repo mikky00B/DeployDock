@@ -15,7 +15,17 @@ async def register_user(
     email: str,
     password: str,
     full_name: str | None,
+    settings: Settings,
 ) -> User:
+    """Create an account.
+
+    When `REQUIRE_EMAIL_VERIFICATION` is on (and SMTP is configured), the
+    account starts unverified and a 6-digit code is emailed; login is refused
+    until the code is confirmed. Otherwise the account is created active —
+    local development and tests work with no SMTP server.
+    """
+    from app.services import email_service
+
     normalized_email = email.lower()
     existing_user = await get_user_by_email(session, normalized_email)
     if existing_user is not None:
@@ -24,14 +34,19 @@ async def register_user(
             detail="Email is already registered",
         )
 
+    must_verify = settings.require_email_verification and email_service.email_enabled(settings)
     user = User(
         email=normalized_email,
         hashed_password=hash_password(password),
         full_name=full_name,
+        email_verified=not must_verify,
     )
     session.add(user)
     await session.commit()
     await session.refresh(user)
+
+    if must_verify:
+        await email_service.issue_verification_code(session, user=user, settings=settings)
     return user
 
 
