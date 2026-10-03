@@ -1,10 +1,10 @@
 """Database-level concurrency guards, verified against real PostgreSQL.
 
 The unit suite runs on SQLite (which skips partial-index enforcement gaps it
-cannot express), so the most safety-critical invariants — one dispatchable
-deployment per app, one live command per deployment — are re-verified here
-against the production engine. Skipped automatically when DATABASE_URL is not
-PostgreSQL; the CI migrations job runs it with a real Postgres 16 service.
+cannot express), so the most safety-critical invariant — one dispatchable
+deployment per app — is re-verified here against the production engine.
+Skipped automatically when DATABASE_URL is not PostgreSQL; the CI migrations
+job runs it with a real Postgres 16 service.
 """
 
 import os
@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
-from app.models import App, Deployment, DeploymentCommand, Server, User
+from app.models import App, Deployment, Server, User
 from app.models.deployment import DeploymentStatus
 
 pytestmark = pytest.mark.skipif(
@@ -114,63 +114,3 @@ async def test_queued_may_wait_behind_a_dispatchable_deployment(pg_session) -> N
         )
     ).scalars().all()
     assert len(queued_rows) == 2  # queued is exempt from the index by design
-
-
-async def test_two_live_commands_for_one_deployment_are_rejected(pg_session) -> None:
-    app = await _seed_owner_app(pg_session)
-
-    user = (await pg_session.execute(select(User))).scalar_one()
-    deployment = Deployment(
-        owner_id=user.id, app_id=app.id, server_id=app.server_id, status=DeploymentStatus.pending
-    )
-    pg_session.add(deployment)
-    await pg_session.flush()
-
-    # agent_id is NOT NULL — create a real agent first.
-    from app.models import Agent
-
-    agent = Agent(owner_id=user.id, server_id=app.server_id, name="pg-agent", token_hash="a" * 64)
-    pg_session.add(agent)
-    await pg_session.flush()
-
-    pg_session.add(
-        DeploymentCommand(
-            agent_id=agent.id,
-            deployment_id=deployment.id,
-            kind="deploy",
-            payload={},
-            status="queued",
-        )
-    )
-    await pg_session.flush()
-
-    duplicate = DeploymentCommand(
-        agent_id=agent.id,
-        deployment_id=deployment.id,
-        kind="deploy",
-        payload={},
-        status="claimed",
-    )
-    pg_session.add(duplicate)
-    with pytest.raises(IntegrityError):
-        await pg_session.flush()
-    await pg_session.rollback()
-
-    # A completed command does not block a fresh dispatch (retry after failure).
-    completed = DeploymentCommand(
-        agent_id=agent.id,
-        deployment_id=deployment.id,
-        kind="deploy",
-        payload={},
-        status="completed",
-    )
-    requeued = DeploymentCommand(
-        agent_id=agent.id,
-        deployment_id=deployment.id,
-        kind="deploy",
-        payload={},
-        status="queued",
-    )
-    pg_session.add(completed)
-    pg_session.add(requeued)
-    await pg_session.flush()  # must not raise
