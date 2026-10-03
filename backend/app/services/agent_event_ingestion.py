@@ -42,6 +42,7 @@ from app.services.agent_dispatch import (
     promote_next_queued_deployment,
 )
 from app.services.deployment_events import deployment_event_bus
+from app.services.email_service import notify_deployment_result
 
 logger = logging.getLogger("deploydock.agent_events")
 
@@ -287,6 +288,7 @@ async def _on_completed(
         metadata={"app_id": str(deployment.app_id), "commit_sha": commit_sha},
     )
     _add_log(session, deployment, allocate, DeploymentLogStream.system, "Deployment succeeded")
+    await notify_deployment_result(session, deployment_id=deployment.id)
     promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
     if promoted is not None:
         # Same app, therefore same server and same agent: re-arm the pipeline.
@@ -324,6 +326,7 @@ async def _on_failed(
         metadata={"app_id": str(deployment.app_id), "error": error},
     )
     _add_log(session, deployment, allocate, DeploymentLogStream.system, f"Deployment failed: {error}")
+    await notify_deployment_result(session, deployment_id=deployment.id)
     promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
     if promoted is not None:
         await dispatch_deployment(session, deployment=promoted)

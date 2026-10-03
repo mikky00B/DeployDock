@@ -51,6 +51,28 @@ class Settings(BaseSettings):
     register_max_attempts: int = Field(default=10, alias="REGISTER_MAX_ATTEMPTS")
     register_window_seconds: int = Field(default=3600, alias="REGISTER_WINDOW_SECONDS")
 
+    # Email (SMTP). With smtp_host unset, email is disabled: signup codes are
+    # skipped, accounts are created active, and notifications are dropped.
+    smtp_host: str = Field(default="", alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_username: str = Field(default="", alias="SMTP_USERNAME")
+    smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
+    email_from: str = Field(default="", alias="EMAIL_FROM")
+    email_from_name: str = Field(default="DeployDock", alias="EMAIL_FROM_NAME")
+    app_public_url: str = Field(default="http://127.0.0.1:5173", alias="APP_PUBLIC_URL")
+    # When true, a fresh account cannot log in until it verifies the emailed
+    # 6-digit code. Default off so local development and tests work without SMTP.
+    require_email_verification: bool = Field(
+        default=False,
+        alias="REQUIRE_EMAIL_VERIFICATION",
+    )
+    email_code_ttl_seconds: int = Field(default=900, alias="EMAIL_CODE_TTL_SECONDS")
+    email_code_max_attempts: int = Field(default=5, alias="EMAIL_CODE_MAX_ATTEMPTS")
+    email_notifications_enabled: bool = Field(
+        default=True,
+        alias="EMAIL_NOTIFICATIONS_ENABLED",
+    )
+
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", env_file_encoding="utf-8")
 
     @field_validator("app_env")

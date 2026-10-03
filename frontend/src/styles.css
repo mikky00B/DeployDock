@@ -1285,25 +1285,67 @@ a {
   }
 
   .app-shell {
-    grid-template-columns: 1fr;
+    /* minmax(0, 1fr): the scrollable nav's nowrap pills would otherwise
+       inflate the track's min-content wider than the phone viewport. */
+    grid-template-columns: minmax(0, 1fr);
   }
 
+  /* Compact top bar instead of a full-height sidebar: the stacked 2-column
+     nav consumed the entire first phone screen on every page. */
   .sidebar {
     border-bottom: 1px solid var(--line-soft);
     border-right: 0;
-    padding: 18px;
+    padding: 12px 16px 10px;
   }
 
   .brand-button {
-    margin-bottom: 16px;
+    margin-bottom: 10px;
+    grid-auto-flow: column;
+    justify-content: start;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .brand-button small {
+    display: none;
   }
 
   .sidebar nav {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sidebar nav::-webkit-scrollbar {
+    display: none;
   }
 
   .nav-group-label {
-    grid-column: 1 / -1;
+    display: none;
+  }
+
+  .nav-link {
+    border: 1px solid var(--line-soft);
+    border-radius: 999px;
+    min-height: 34px;
+    padding: 6px 14px;
+    white-space: nowrap;
+  }
+
+  .nav-link.active {
+    border-color: color-mix(in oklab, var(--accent) 35%, var(--line));
+  }
+
+  .secondary-button,
+  .danger-button,
+  .primary-inline-button {
+    white-space: nowrap;
+  }
+
+  .account-menu {
+    flex-wrap: wrap;
   }
 
   .content {
@@ -1347,6 +1389,38 @@ a {
   }
 
   .deployment-table-row.heading {
+    display: none;
+  }
+
+  /* The 7-column table stacks; without column labels the stacked values
+     ("Deploy", "Unknown", "0s") stop meaning anything. Label each cell via
+     its fixed position and drop the two low-value columns. */
+  .deployment-table-row:not(.heading) {
+    row-gap: 8px;
+  }
+
+  .deployment-table-row:not(.heading) > span:nth-child(3)::before {
+    content: "Kind: ";
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    margin-right: 6px;
+  }
+
+  .deployment-table-row:not(.heading) > span:nth-child(5)::before {
+    content: "Started: ";
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-3);
+    margin-right: 6px;
+  }
+
+  .deployment-table-row:not(.heading) > span:nth-child(4),
+  .deployment-table-row:not(.heading) > span:nth-child(6) {
     display: none;
   }
 
@@ -1468,6 +1542,10 @@ a {
 /* Hero */
 .landing .hero { padding: 88px 0 40px; position: relative; }
 .landing .hero-grid { display: grid; grid-template-columns: 1.05fr 1fr; gap: 56px; align-items: center; }
+/* Grid children refuse to shrink below their min-content width: the install
+   command's unbreakable URL otherwise forces the column wider than a phone
+   viewport and clips every sibling. */
+.landing .hero-grid > div { min-width: 0; }
 .landing .eyebrow {
   display: inline-flex; align-items: center; gap: 8px;
   font-family: "JetBrains Mono", monospace;
@@ -1502,10 +1580,15 @@ a {
   color: var(--fg-2);
   cursor: pointer;
   user-select: all;
+  max-width: 100%;
 }
 .landing .install-line:hover { border-color: var(--fg-3); }
 .landing .install-line .prompt { color: var(--accent); }
 .landing .install-line .copy { color: var(--fg-3); margin-left: 6px; font-size: 11px; }
+/* The clone URL is one unbreakable token; on phones it scrolls inside the pill
+   instead of pushing the hero wider than the viewport. */
+.landing .install-line > span:nth-child(2) { overflow-x: auto; scrollbar-width: none; }
+.landing .install-line > span:nth-child(2)::-webkit-scrollbar { display: none; }
 
 /* Hero visual: dashboard + logs */
 .landing .product {
@@ -1740,6 +1823,11 @@ a {
 }
 @media (max-width: 560px) {
   .landing .features { grid-template-columns: 1fr; }
+  .landing .logos-row { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .landing .logo-item { font-size: 13px; }
+  .landing .hero { padding: 56px 0 32px; }
+  .landing .install-line { width: 100%; }
+  .landing .hero-ctas .btn { flex: 1 1 auto; justify-content: center; }
 }
 
 @media (prefers-reduced-motion: reduce) {

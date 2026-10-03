@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { getCurrentUser, login, logout, register, type LoginPayload, type RegisterPayload } from "../api/auth";
+import { getCurrentUser, login, logout, register, type AuthResponse, type LoginPayload, type RegisterPayload } from "../api/auth";
 import type { User } from "../types/auth";
 
 const TOKEN_STORAGE_KEY = "deploydock.access_token";
@@ -18,8 +18,9 @@ type AuthContextValue = {
   token: string | null;
   isLoading: boolean;
   authError: string | null;
-  signIn: (payload: LoginPayload) => Promise<void>;
-  signUp: (payload: RegisterPayload) => Promise<void>;
+  signIn: (payload: LoginPayload) => Promise<AuthResponse>;
+  signUp: (payload: RegisterPayload) => Promise<AuthResponse>;
+  completeAuth: (response: AuthResponse) => void;
   signOut: () => Promise<void>;
   clearAuthError: () => void;
 };
@@ -78,7 +79,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (payload: LoginPayload) => {
       try {
         const response = await login(payload);
+        // Verification-required responses carry no token; the caller shows
+        // the code form and finishes via completeAuth.
+        if (response.email_verification_required) {
+          setAuthError(null);
+          return response;
+        }
         storeSession(response.token.access_token, response.user);
+        return response;
       } catch (error) {
         setAuthError(error instanceof Error ? error.message : "Could not sign in");
         throw error;
@@ -91,11 +99,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (payload: RegisterPayload) => {
       try {
         const response = await register(payload);
+        if (response.email_verification_required) {
+          setAuthError(null);
+          return response;
+        }
         storeSession(response.token.access_token, response.user);
+        return response;
       } catch (error) {
         setAuthError(error instanceof Error ? error.message : "Could not create account");
         throw error;
       }
+    },
+    [storeSession],
+  );
+
+  const completeAuth = useCallback(
+    (response: AuthResponse) => {
+      storeSession(response.token.access_token, response.user);
     },
     [storeSession],
   );
@@ -116,10 +136,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authError,
       signIn,
       signUp,
+      completeAuth,
       signOut,
       clearAuthError: () => setAuthError(null),
     }),
-    [authError, isLoading, signIn, signOut, signUp, token, user],
+    [authError, completeAuth, isLoading, signIn, signOut, signUp, token, user],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
