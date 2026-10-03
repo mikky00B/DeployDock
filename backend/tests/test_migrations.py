@@ -95,12 +95,13 @@ def test_migration_0007_matches_the_deployment_status_enum(tmp_path, monkeypatch
                 "key": "encrypted",
             },
         )
-        # uq_deployments_active_per_app allows at most one pending/running row
-        # per app, so the two active statuses each get their own app.
-        pending_app_id = str(uuid.uuid4())
-        running_app_id = str(uuid.uuid4())
-        inactive_app_id = str(uuid.uuid4())
-        for app_id in (pending_app_id, running_app_id, inactive_app_id):
+        # uq_deployments_active_per_app (widened in 0012) allows at most one
+        # dispatchable row — every active status except 'queued' — per app, so
+        # every status gets its own app for the round-trip write.
+        per_status_app_ids: dict[str, str] = {}
+        for status_value in declared_values:
+            app_id = str(uuid.uuid4())
+            per_status_app_ids[status_value] = app_id
             connection.execute(
                 sa.text(
                     "INSERT INTO apps (id, owner_id, server_id, name, repository_url, app_path, deploy_command) "
@@ -116,7 +117,6 @@ def test_migration_0007_matches_the_deployment_status_enum(tmp_path, monkeypatch
                     "command": "make deploy",
                 },
             )
-        active_app_ids = {"pending": pending_app_id, "running": running_app_id}
         for status_value in declared_values:
             connection.execute(
                 sa.text(
@@ -126,7 +126,7 @@ def test_migration_0007_matches_the_deployment_status_enum(tmp_path, monkeypatch
                 {
                     "id": str(uuid.uuid4()),
                     "owner_id": owner_id,
-                    "app_id": active_app_ids.get(status_value, inactive_app_id),
+                    "app_id": per_status_app_ids[status_value],
                     "server_id": server_id,
                     "status": status_value,
                 },

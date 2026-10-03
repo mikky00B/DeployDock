@@ -26,7 +26,7 @@ from app.schemas.agent import (
     AgentTokenRotateRead,
 )
 from app.services.agent_dispatch import claim_next_command, complete_command
-from app.services.agent_event_ingestion import EventRejected, ingest_event
+from app.services.agent_event_ingestion import ingest_events
 from app.services.agent_service import (
     create_registration_token,
     get_agent_by_token,
@@ -245,13 +245,5 @@ async def agent_events(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Agent token does not belong to this agent",
         )
-    accepted = 0
-    for event in payload.events:
-        try:
-            await ingest_event(session, agent=agent, event=event)
-        except EventRejected as exc:
-            # One bad event must not sink the batch; the agent's remaining
-            # events stay applicable. Rejections are visible in the response.
-            continue
-        accepted += 1
-    return AgentEventBatchRead(accepted=accepted)
+    accepted, rejected = await ingest_events(session, agent=agent, events=payload.events)
+    return AgentEventBatchRead(accepted=accepted, rejected=rejected)

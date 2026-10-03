@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import HTTPException, status
@@ -17,6 +18,8 @@ from app.services.ssh_service import (
     SSHCommandResult,
     SSHService,
 )
+
+logger = logging.getLogger("deploydock.app_service")
 
 
 async def create_app(
@@ -224,11 +227,22 @@ async def run_app_command(
             timeout_seconds=timeout_seconds,
         )
     except (HostKeyMismatchError, HostKeyUnpinnedError) as exc:
+        # These carry actionable, reviewed messages — safe to surface as-is.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception(
+            "SSH command failed for app %s on %s:%s",
+            app.name,
+            app.server.host,
+            app.server.port,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"SSH command failed: {exc}",
+            detail=(
+                f"Could not run the command on {app.server.host}:{app.server.port}. "
+                "Check the server's connectivity, credentials, and host-key pin, "
+                "then try again."
+            ),
         ) from exc
 
 

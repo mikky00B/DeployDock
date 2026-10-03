@@ -89,3 +89,4 @@ class AgentEventBatch(BaseModel):
 
 class AgentEventBatchRead(BaseModel):
     accepted: int
+    rejected: int = 0

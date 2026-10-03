@@ -109,6 +109,7 @@ type Event struct {
 // EventBatchRead reports how many events the control plane applied.
 type EventBatchRead struct {
 	Accepted int `json:"accepted"`
+	Rejected int `json:"rejected"`
 }
 
 // Client talks to one control plane over outbound HTTPS (or HTTP in dev).

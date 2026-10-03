@@ -386,7 +386,9 @@ async def test_repin_host_key_reports_an_unreachable_server(server_client) -> No
     response = client.post(f"/api/v1/servers/{created['id']}/host-key", headers=headers)
 
     assert response.status_code == 502
-    assert "Could not read host key" in response.json()["detail"]
+    assert "Could not read a host key" in response.json()["detail"]
+    # Library exception internals must not leak into the response.
+    assert "UnreachableHostKey" not in response.json()["detail"]
 
 
 async def test_repin_host_key_is_owner_scoped(server_client) -> None:

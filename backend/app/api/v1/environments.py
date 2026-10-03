@@ -52,7 +52,11 @@ async def _owned_domain(
     return domain
 
 
-@router.post("/apps/{app_id}/environments", response_model=EnvironmentRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/apps/{app_id}/environments",
+    response_model=EnvironmentRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_environment_endpoint(
     app_id: uuid.UUID,
     payload: EnvironmentCreate,

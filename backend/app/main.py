@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.rate_limit import configure_login_rate_limiter
 from app.db.session import AsyncSessionLocal, engine
+from app.services.agent_dispatch import reclaim_stale_commands
 from app.services.deployment_service import fail_orphaned_deployments
 
 settings = get_settings()
@@ -37,7 +39,54 @@ async def lifespan(_: FastAPI):
     except Exception:  # noqa: BLE001 - never block startup on the sweep
         logger.exception("Could not sweep interrupted deployments at startup")
 
-    yield
+    try:
+        async with AsyncSessionLocal() as session:
+            await reclaim_stale_commands(
+                session,
+                lease_seconds=settings.agent_command_lease_seconds,
+            )
+    except Exception:  # noqa: BLE001 - never block startup on the sweep
+        logger.exception("Could not sweep stale agent commands at startup")
+
+    # Development guardrail: the default JWT/encryption keys are publicly known.
+    # Production already refuses to boot with them; everywhere else, say it out loud.
+    if not settings.is_production:
+        weak = []
+        if settings.secret_key == "change-me":
+            weak.append("SECRET_KEY (sessions are forgeable with the public default)")
+        if settings.encryption_key == "change-me-32-byte-key":
+            weak.append("ENCRYPTION_KEY (stored secrets are decryptable with the public default)")
+        if weak:
+            logger.warning(
+                "Running with default development keys — set real values before any "
+                "exposed deployment: %s",
+                "; ".join(weak),
+            )
+
+    # Agents can die mid-deploy while this process keeps running, so the
+    # command-lease sweep has to be periodic, not startup-only.
+    sweep_task = asyncio.create_task(
+        _periodic_command_reclaim(settings.agent_reclaim_sweep_seconds)
+    )
+    try:
+        yield
+    finally:
+        sweep_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweep_task
+
+
+async def _periodic_command_reclaim(every_seconds: int) -> None:
+    while True:
+        await asyncio.sleep(every_seconds)
+        try:
+            async with AsyncSessionLocal() as session:
+                await reclaim_stale_commands(
+                    session,
+                    lease_seconds=settings.agent_command_lease_seconds,
+                )
+        except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
+            logger.exception("Periodic agent command reclaim failed")
 
 
 app = FastAPI(title="DeployDock API", lifespan=lifespan)
@@ -70,7 +119,7 @@ async def metrics() -> Response:
     from sqlalchemy import func, select
 
     from app.models import Agent, App, Deployment, Server
-    from app.models.deployment import DeploymentStatus, TERMINAL_DEPLOYMENT_STATUSES
+    from app.models.deployment import TERMINAL_DEPLOYMENT_STATUSES, DeploymentStatus
 
     try:
         async with AsyncSessionLocal() as session:
@@ -99,7 +148,8 @@ async def metrics() -> Response:
     lines.append("# HELP deployment_total Deployments by status.")
     lines.append("# TYPE deployment_total counter")
     for status_value in DeploymentStatus:
-        lines.append(f'deployment_total{{status="{status_value.value}"}} {status_counts.get(status_value, 0)}')
+        label = status_value.value
+        lines.append(f'deployment_total{{status="{label}"}} {status_counts.get(status_value, 0)}')
 
     deploy_count, duration_sum = duration[0] or 0, duration[1] or 0
     lines.append("# HELP deployment_duration_seconds_sum Total deploy duration of terminal deployments.")

@@ -12,17 +12,12 @@ Security model:
 
 import hashlib
 import hmac
-import json
 import uuid
-from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings
-from app.core.encryption import decrypt_text
 from app.models import App, Deployment, WebhookDelivery, WebhookDeliveryResult
-from app.services.deployment_service import create_deployment  # noqa: F401 (documented flow)
 
 
 def verify_signature(*, secret: str, signature_header: str | None, raw_body: bytes) -> bool:
@@ -103,9 +98,13 @@ async def handle_push(
     commit_message: str | None,
     commit_sha: str | None,
     current_user,
-    settings: Settings,
 ) -> Deployment:
-    """A verified push for this app: create (or queue) the deployment."""
+    """A verified push for this app: create (or queue) the deployment.
+
+    The local import keeps deployment_service → app_service → server_service
+    out of this module's import cycle; deployment_service does not import
+    webhook_service, so this is one-directional at call time.
+    """
     from app.services.deployment_service import create_deployment
 
     deployment = await create_deployment(
@@ -126,7 +125,3 @@ async def webhook_owner_for_app(session: AsyncSession, *, app: App):
     from app.models import User
 
     return await session.get(User, app.owner_id)
-
-
-def now_utc() -> datetime:
-    return datetime.now(UTC)

@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.encryption import encrypt_text
+from app.core.secrets import decrypt_secret, encrypt_secret
 from app.models import App, Domain, DomainStatus, Environment, EnvironmentVariable, Server, User
 from app.schemas.environment import DomainCreate, DomainVerifyRead, EnvironmentCreate
 from app.services.audit_service import create_audit_log
@@ -65,12 +65,12 @@ async def create_environment(
     session.add(environment)
     try:
         await session.flush()
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Environment '{payload.name}' already exists for this app",
-        )
+        ) from exc
     await create_audit_log(
         session,
         current_user=current_user,
@@ -105,7 +105,7 @@ async def set_variable(
         )
     )
     variable = result.scalar_one_or_none()
-    encrypted = encrypt_text(value, settings.encryption_key, key_id=settings.encryption_key_id)
+    encrypted = encrypt_secret(value, settings)
     if variable is None:
         variable = EnvironmentVariable(environment_id=environment.id, key=key, encrypted_value=encrypted)
         session.add(variable)
@@ -172,17 +172,10 @@ async def decrypted_variables(
     settings: Settings,
 ) -> dict[str, str]:
     """Variables for deployment injection — control-plane internal only."""
-    from app.core.encryption import decrypt_text
-
     variables = await list_variables(session, environment=environment)
     values: dict[str, str] = {}
     for variable in variables:
-        values[variable.key] = decrypt_text(
-            variable.encrypted_value,
-            settings.encryption_key,
-            key_id=settings.encryption_key_id,
-            retired_keys=settings.retired_encryption_keys,
-        )
+        values[variable.key] = decrypt_secret(variable.encrypted_value, settings)
     return values
 
 
@@ -197,12 +190,12 @@ async def add_domain(
     session.add(domain)
     try:
         await session.flush()
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Domain {payload.hostname} already exists",
-        )
+        ) from exc
     await create_audit_log(
         session,
         current_user=current_user,
@@ -253,7 +246,11 @@ async def verify_domain(
     await session.commit()
     return DomainVerifyRead(
         verified=verified,
-        message="DNS points at the server" if verified else (domain.last_verification_error or "DNS mismatch"),
+        message=(
+            "DNS points at the server"
+            if verified
+            else (domain.last_verification_error or "DNS mismatch")
+        ),
         expected_ip=sorted(expected_ips)[0] if expected_ips else None,
         resolved_ips=sorted(resolved_ips),
     )

@@ -11,9 +11,8 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_db_session, get_sessionmaker
 from app.main import app
-from app.models import Agent, App, Deployment, DeploymentCommand, User
+from app.models import App, Deployment, DeploymentCommand, User
 from app.models.deployment import DeploymentStatus
-from app.models.deployment_command import AgentCommandStatus
 from app.services.ssh_service import get_ssh_service
 
 TEST_PRIVATE_KEY = """-----BEGIN OPENSSH PRIVATE KEY-----
@@ -345,7 +344,7 @@ def test_result_requires_matching_claim_token(agent_deployment_client) -> None:
     registered = register_agent_for_server(client, headers, server)
     app_record = create_app(client, headers, server)
 
-    deployment_id = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers).json()["id"]
+    client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers).json()
     command = claim_command(client, registered)[0]
 
     wrong_token = client.post(
@@ -380,7 +379,7 @@ def test_rollback_dispatches_rollback_command_with_target_commit(agent_deploymen
 
     rollback_response = client.post(f"/api/v1/deployments/{second_id}/rollback", headers=headers)
     assert rollback_response.status_code == 202
-    rollback = rollback_response.json()
+    assert rollback_response.json()["kind"] == "rollback"
 
     command = claim_command(client, registered)[0]
     assert command["kind"] == "rollback"

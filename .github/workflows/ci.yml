@@ -84,6 +84,33 @@ jobs:
           alembic downgrade base
           alembic upgrade head
 
+      - name: Concurrency guards against PostgreSQL
+        # The unit suite runs on SQLite, which cannot prove the partial-index
+        # guards; these tests exercise them on the production engine.
+        run: pytest tests/test_postgres_concurrency.py -q
+
+  go:
+    name: Go (agent, CLI, engine)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
   frontend:
     name: Frontend (lint, types, tests, build)
     runs-on: ubuntu-latest

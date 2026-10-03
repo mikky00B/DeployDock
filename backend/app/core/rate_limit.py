@@ -135,13 +135,12 @@ class LoginRateLimiter:
 
 
 login_rate_limiter = LoginRateLimiter()
+# Registration is unauthenticated, so every attempt counts (not just failures)
+# and the window is deliberately longer than login's.
+register_rate_limiter = LoginRateLimiter(max_attempts=10, window_seconds=3600)
 
 
-def configure_login_rate_limiter(settings) -> LoginRateLimiter:
-    """Point the shared limiter at Redis when configured. Called at startup."""
-    global login_rate_limiter
-
-    backend: RateLimitBackend
+def _build_backend(settings, window_seconds: int) -> RateLimitBackend:
     if settings.redis_url:
         try:
             from redis.asyncio import from_url
@@ -150,22 +149,47 @@ def configure_login_rate_limiter(settings) -> LoginRateLimiter:
                 "REDIS_URL is set but the redis package is not installed; "
                 "falling back to the per-process rate limiter."
             )
-            backend = InMemoryRateLimitBackend(window_seconds=settings.login_window_seconds)
-        else:
-            backend = RedisRateLimitBackend(
-                from_url(settings.redis_url, decode_responses=True),
-                window_seconds=settings.login_window_seconds,
-            )
-    else:
-        logger.warning(
-            "No REDIS_URL configured: login rate limiting is per-process. "
-            "Run a single API worker, or set REDIS_URL, to make the limit accurate."
+            return InMemoryRateLimitBackend(window_seconds=window_seconds)
+        return RedisRateLimitBackend(
+            from_url(settings.redis_url, decode_responses=True),
+            window_seconds=window_seconds,
         )
-        backend = InMemoryRateLimitBackend(window_seconds=settings.login_window_seconds)
+    return InMemoryRateLimitBackend(window_seconds=window_seconds)
+
+
+def configure_login_rate_limiter(settings) -> None:
+    """Point the shared limiters at Redis when configured. Called at startup."""
+    global login_rate_limiter, register_rate_limiter
 
     login_rate_limiter = LoginRateLimiter(
         max_attempts=settings.login_max_attempts,
         window_seconds=settings.login_window_seconds,
-        backend=backend,
+        backend=_build_backend(settings, settings.login_window_seconds),
     )
-    return login_rate_limiter
+    register_rate_limiter = LoginRateLimiter(
+        max_attempts=settings.register_max_attempts,
+        window_seconds=settings.register_window_seconds,
+        backend=_build_backend(settings, settings.register_window_seconds),
+    )
+
+    if not settings.redis_url:
+        logger.warning(
+            "No REDIS_URL configured: rate limiting is per-process. "
+            "Run a single API worker, or set REDIS_URL, to make the limits accurate."
+        )
+
+
+def client_ip(request, settings) -> str:
+    """The client IP for rate-limiting and audit keys.
+
+    Only trusts X-Forwarded-For when TRUST_PROXY_HEADERS is set — otherwise any
+    client could spoof it. Behind a reverse proxy you control, set it so every
+    user does not share the proxy's single bucket.
+    """
+    if settings.trust_proxy_headers:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            first_hop = forwarded.split(",")[0].strip()
+            if first_hop:
+                return first_hop
+    return request.client.host if request.client else "unknown"

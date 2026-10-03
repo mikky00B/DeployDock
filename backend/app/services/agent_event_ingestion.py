@@ -9,10 +9,14 @@ Ingestion is defensive by design:
 - terminal statuses are never overwritten (cancel must win over a racing
   agent result);
 - unknown event types are logged as system lines instead of rejected, so an
-  older/newer agent can still report.
+  older/newer agent can still report;
+- rejections are logged server-side and counted in the response — a
+  systematically misbehaving agent must be visible.
 """
 
+import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
@@ -39,6 +43,8 @@ from app.services.agent_dispatch import (
 )
 from app.services.deployment_events import deployment_event_bus
 
+logger = logging.getLogger("deploydock.agent_events")
+
 STAGE_TO_STATUS = {
     "clone": DeploymentStatus.cloning,
     "build": DeploymentStatus.building,
@@ -54,7 +60,78 @@ class EventRejected(Exception):
     """The event cannot be applied (unknown deployment, terminal status)."""
 
 
-async def ingest_event(session: AsyncSession, *, agent: Agent, event: dict) -> None:
+async def ingest_events(
+    session: AsyncSession,
+    *,
+    agent: Agent,
+    events: list[dict],
+) -> tuple[int, int]:
+    """Apply a batch of agent events. Returns (accepted, rejected).
+
+    The per-deployment log sequence is read once per deployment per batch and
+    then allocated in memory — a several-hundred-line deploy log must not cost
+    one max(sequence) query per line.
+    """
+    accepted = 0
+    rejected = 0
+    # deployment_id → (deployment, next log sequence)
+    batch: dict[uuid.UUID, tuple[Deployment, int]] = {}
+
+    for event in events:
+        try:
+            deployment = await _owned_deployment(session, agent=agent, event=event)
+        except EventRejected as exc:
+            logger.warning(
+                "Rejected agent event from %s (%s): %s",
+                agent.name,
+                event.get("type"),
+                exc,
+            )
+            rejected += 1
+            continue
+
+        if deployment.id not in batch:
+            next_sequence = await _max_sequence(session, deployment.id)
+            batch[deployment.id] = (deployment, next_sequence)
+
+        stored_deployment, next_sequence = batch[deployment.id]
+        handler = _HANDLERS.get(event.get("type"))
+        if handler is None:
+            allocate = _allocator(stored_deployment, batch)
+            _add_log(
+                session,
+                stored_deployment,
+                allocate,
+                DeploymentLogStream.system,
+                f"unhandled agent event type: {event.get('type')}",
+            )
+        else:
+            await handler(
+                session,
+                deployment=stored_deployment,
+                event=event,
+                allocate=_allocator(stored_deployment, batch),
+            )
+
+        batch[deployment.id] = (stored_deployment, batch[deployment.id][1])
+        accepted += 1
+
+    await session.commit()
+    for deployment_id in batch:
+        deployment_event_bus.notify(deployment_id)
+    return accepted, rejected
+
+
+def _allocator(deployment: Deployment, batch: dict) -> Callable[[], int]:
+    def allocate() -> int:
+        stored, next_sequence = batch[deployment.id]
+        batch[deployment.id] = (stored, next_sequence + 1)
+        return next_sequence
+
+    return allocate
+
+
+async def _owned_deployment(session: AsyncSession, *, agent: Agent, event: dict) -> Deployment:
     deployment_id_text = event.get("deployment_id")
     if not deployment_id_text:
         raise EventRejected("event is missing deployment_id")
@@ -75,43 +152,53 @@ async def ingest_event(session: AsyncSession, *, agent: Agent, event: dict) -> N
     deployment = result.scalar_one_or_none()
     if deployment is None:
         raise EventRejected(f"agent does not hold a command for deployment {deployment_id}")
-
-    event_type = event.get("type")
-    handler = _HANDLERS.get(event_type)
-    if handler is None:
-        await _add_log(
-            session,
-            deployment,
-            DeploymentLogStream.system,
-            f"unhandled agent event type: {event_type}",
-        )
-    else:
-        await handler(session, deployment=deployment, event=event)
-
-    await session.commit()
-    deployment_event_bus.notify(deployment.id)
+    return deployment
 
 
-async def _on_started(session: AsyncSession, *, deployment: Deployment, event: dict) -> None:
+async def _on_started(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
     if deployment.started_at is None:
         deployment.started_at = datetime.now(UTC)
-    await _add_log(session, deployment, DeploymentLogStream.system, "Agent picked up deployment")
+    _add_log(session, deployment, allocate, DeploymentLogStream.system, "Agent picked up deployment")
 
 
-async def _on_stage_started(session: AsyncSession, *, deployment: Deployment, event: dict) -> None:
+async def _on_stage_started(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
     stage = str(event.get("stage", ""))
     status = STAGE_TO_STATUS.get(stage)
     if status is not None and deployment.status not in TERMINAL_DEPLOYMENT_STATUSES:
         deployment.status = status
-    await _add_log(session, deployment, DeploymentLogStream.system, f"Stage started: {stage}")
+    _add_log(session, deployment, allocate, DeploymentLogStream.system, f"Stage started: {stage}")
 
 
-async def _on_stage_completed(session: AsyncSession, *, deployment: Deployment, event: dict) -> None:
+async def _on_stage_completed(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
     stage = str(event.get("stage", ""))
-    await _add_log(session, deployment, DeploymentLogStream.system, f"Stage completed: {stage}")
+    _add_log(session, deployment, allocate, DeploymentLogStream.system, f"Stage completed: {stage}")
 
 
-async def _on_log(session: AsyncSession, *, deployment: Deployment, event: dict) -> None:
+async def _on_log(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
     stream_name = str(event.get("stream", "stdout"))
     try:
         stream = DeploymentLogStream(stream_name)
@@ -120,36 +207,56 @@ async def _on_log(session: AsyncSession, *, deployment: Deployment, event: dict)
     lines = event.get("lines")
     if isinstance(lines, list):
         for line in lines:
-            await _add_log(session, deployment, stream, str(line))
+            _add_log(session, deployment, allocate, stream, str(line))
     elif event.get("line") is not None:
-        await _add_log(session, deployment, stream, str(event["line"]))
+        _add_log(session, deployment, allocate, stream, str(event["line"]))
 
 
-async def _on_health_check_passed(session: AsyncSession, *, deployment: Deployment, event: dict) -> None:
+async def _on_health_check_passed(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
     deployment.healthcheck_status_code = event.get("status_code")
     deployment.healthcheck_ok = True
     deployment.healthcheck_error = None
-    await _add_log(
+    _add_log(
         session,
         deployment,
+        allocate,
         DeploymentLogStream.system,
         f"Health check passed ({event.get('status_code')})",
     )
 
 
-async def _on_health_check_failed(session: AsyncSession, *, deployment: Deployment, event: dict) -> None:
+async def _on_health_check_failed(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
     deployment.healthcheck_status_code = event.get("status_code")
     deployment.healthcheck_ok = False
     deployment.healthcheck_error = str(event.get("error") or "health check failed")
-    await _add_log(
+    _add_log(
         session,
         deployment,
+        allocate,
         DeploymentLogStream.system,
         f"Health check failed: {deployment.healthcheck_error}",
     )
 
 
-async def _on_completed(session: AsyncSession, *, deployment: Deployment, event: dict) -> None:
+async def _on_completed(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
     if deployment.status in TERMINAL_DEPLOYMENT_STATUSES:
         return  # cancel already won; do not resurrect
     commit_sha = event.get("commit_sha") or deployment.commit_sha
@@ -179,14 +286,20 @@ async def _on_completed(session: AsyncSession, *, deployment: Deployment, event:
         entity_id=deployment.id,
         metadata={"app_id": str(deployment.app_id), "commit_sha": commit_sha},
     )
-    await _add_log(session, deployment, DeploymentLogStream.system, "Deployment succeeded")
+    _add_log(session, deployment, allocate, DeploymentLogStream.system, "Deployment succeeded")
     promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
     if promoted is not None:
         # Same app, therefore same server and same agent: re-arm the pipeline.
         await dispatch_deployment(session, deployment=promoted)
 
 
-async def _on_failed(session: AsyncSession, *, deployment: Deployment, event: dict) -> None:
+async def _on_failed(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
     if deployment.status in TERMINAL_DEPLOYMENT_STATUSES:
         return  # cancel already won; do not resurrect
     error = str(event.get("error") or "Deployment failed on agent")
@@ -210,31 +323,36 @@ async def _on_failed(session: AsyncSession, *, deployment: Deployment, event: di
         entity_id=deployment.id,
         metadata={"app_id": str(deployment.app_id), "error": error},
     )
-    await _add_log(session, deployment, DeploymentLogStream.system, f"Deployment failed: {error}")
+    _add_log(session, deployment, allocate, DeploymentLogStream.system, f"Deployment failed: {error}")
     promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
     if promoted is not None:
         await dispatch_deployment(session, deployment=promoted)
 
 
-async def _add_log(
+def _add_log(
     session: AsyncSession,
     deployment: Deployment,
+    allocate: Callable[[], int],
     stream: DeploymentLogStream,
     line: str,
 ) -> None:
     if not line:
         return
-    next_sequence = await session.scalar(
-        select(func.max(DeploymentLog.sequence)).where(DeploymentLog.deployment_id == deployment.id)
-    )
     session.add(
         DeploymentLog(
             deployment_id=deployment.id,
             stream=stream,
             line=line,
-            sequence=(next_sequence or 0) + 1,
+            sequence=allocate(),
         )
     )
+
+
+async def _max_sequence(session: AsyncSession, deployment_id: uuid.UUID) -> int:
+    current = await session.scalar(
+        select(func.max(DeploymentLog.sequence)).where(DeploymentLog.deployment_id == deployment_id)
+    )
+    return (current or 0) + 1
 
 
 async def create_audit(
