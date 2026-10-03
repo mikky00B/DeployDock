@@ -59,6 +59,15 @@ DISPATCHABLE_DEPLOYMENT_STATUSES = tuple(
     status for status in ACTIVE_DEPLOYMENT_STATUSES if status is not DeploymentStatus.queued
 )
 
+# The partial index predicate, derived from the tuple so the model, the
+# service-layer guard, and the migration can never drift apart. Before this was
+# derived, the index only covered ('pending', 'running') — so once an agent
+# moved a deployment into a pipeline stage, the database stopped enforcing the
+# guard and only the (racy) service-layer check remained.
+DISPATCHABLE_STATUS_PREDICATE = "status IN ({})".format(
+    ", ".join(f"'{status.value}'" for status in DISPATCHABLE_DEPLOYMENT_STATUSES)
+)
+
 
 class DeploymentKind(str, enum.Enum):
     deploy = "deploy"
@@ -70,15 +79,17 @@ class Deployment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_deployments_app_id", "app_id"),
         Index("ix_deployments_status", "status"),
-        # At most one non-terminal deployment per app. This is the authoritative
-        # concurrency guard: the service-layer check is a friendlier error path,
-        # but only the database can settle a race between two API workers.
+        # At most one dispatchable deployment per app (every active status
+        # except `queued`, which exists to wait behind these). This is the
+        # authoritative concurrency guard: the service-layer check is a
+        # friendlier error path, but only the database can settle a race
+        # between two API workers.
         Index(
             "uq_deployments_active_per_app",
             "app_id",
             unique=True,
-            postgresql_where=text("status IN ('pending', 'running')"),
-            sqlite_where=text("status IN ('pending', 'running')"),
+            postgresql_where=text(DISPATCHABLE_STATUS_PREDICATE),
+            sqlite_where=text(DISPATCHABLE_STATUS_PREDICATE),
         ),
     )
 

@@ -107,6 +107,166 @@ deploy ALL=(root) NOPASSWD: /usr/sbin/nginx -t`}</code>
         </div>
       </section>
 
+      <section className="docs-section" aria-labelledby="cli-title">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Command line interface</p>
+            <h2 id="cli-title">Operate DeployDock from your terminal</h2>
+          </div>
+        </div>
+        <p className="form-helper" style={{ maxWidth: 720, marginBottom: 22 }}>
+          The <code className="inline-code">deploydock</code> CLI talks to the control plane over its API — it never
+          SSHes into your servers directly. Everything the dashboard can do, the CLI can script: projects, deploys, live
+          logs, and rollbacks.
+        </p>
+
+        <div className="docs-command-grid">
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Install</h3>
+            </div>
+            <p>
+              The CLI ships in this repository and builds with any Go 1.22+ toolchain. On the machine you develop from:
+            </p>
+            <pre className="command-snippet">
+              <code>{`git clone https://github.com/mikky00B/DeployDock.git
+cd DeployDock
+
+# Linux / macOS
+go build -o deploydock ./go/cmd/deploydock
+
+# Windows (PowerShell)
+go build -o deploydock.exe ./go/cmd/deploydock
+
+./deploydock version`}</code>
+            </pre>
+            <p>Move the binary somewhere on your <code className="inline-code">PATH</code> (for example <code className="inline-code">/usr/local/bin</code>).</p>
+          </article>
+
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Sign in</h3>
+            </div>
+            <p>
+              Credentials are stored in <code className="inline-code">~/.config/deploydock/config.yaml</code> with
+              owner-only permissions.
+            </p>
+            <pre className="command-snippet">
+              <code>{`deploydock login --url http://127.0.0.1:8000
+# Email: you@example.com
+# Password: ********
+
+deploydock whoami
+deploydock logout`}</code>
+            </pre>
+            <p>
+              For CI, skip the prompts with flags or environment variables
+              (<code className="inline-code">DEPLOYDOCK_URL</code>, <code className="inline-code">DEPLOYDOCK_EMAIL</code>,{" "}
+              <code className="inline-code">DEPLOYDOCK_PASSWORD</code>).
+            </p>
+          </article>
+
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Projects</h3>
+            </div>
+            <pre className="command-snippet">
+              <code>{`deploydock projects
+
+deploydock project create \\
+  --name watchdog \\
+  --repo https://github.com/you/watchdog.git \\
+  --deploy-command "make build" \\
+  --port 8080 --health-path /health
+
+deploydock project inspect watchdog
+deploydock project delete watchdog`}</code>
+            </pre>
+            <p>
+              <code className="inline-code">--server</code> is optional when exactly one server is registered; pass its
+              id when you have several.
+            </p>
+          </article>
+
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Deploy, logs, rollback</h3>
+            </div>
+            <pre className="command-snippet">
+              <code>{`deploydock deploy watchdog
+# Deploying watchdog...
+#
+# ✓ Stage started: clone
+# Cloned in 1.2s
+# ✓ SUCCESS
+
+deploydock status --json
+deploydock logs watchdog
+deploydock rollback watchdog`}</code>
+            </pre>
+            <p>
+              <code className="inline-code">deploy</code> streams the deployment live until it finishes.{" "}
+              <code className="inline-code">rollback</code> re-deploys the last successful release; pass{" "}
+              <code className="inline-code">--to DEPLOYMENT_ID</code> to target an older one.
+            </p>
+          </article>
+
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Initialize a project</h3>
+            </div>
+            <p>
+              Run <code className="inline-code">deploydock init</code> inside an app with a Dockerfile to generate a
+              starting <code className="inline-code">deploydock.yaml</code>:
+            </p>
+            <pre className="command-snippet">
+              <code>{`name: watchdog
+
+build:
+  type: docker
+  dockerfile: Dockerfile
+
+deploy:
+  port: 8080
+
+health:
+  path: /health`}</code>
+            </pre>
+            <p>
+              <code className="inline-code">deploydock deploy</code> with no arguments uses the{" "}
+              <code className="inline-code">name</code> from this file.
+            </p>
+          </article>
+
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Install the agent on a VPS</h3>
+            </div>
+            <p>
+              The agent executes deployments on the server itself: Docker builds, health checks, nginx. Build it from
+              the same repository and register it against a server you already added:
+            </p>
+            <pre className="command-snippet">
+              <code>{`go build -o deploydock-agent ./go/cmd/deploydock-agent
+
+# 1. Mint a registration token (from your dashboard account):
+curl -X POST http://127.0.0.1:8000/api/v1/agents/registration-tokens \\
+  -H "Authorization: Bearer $DEPLOYDOCK_TOKEN" \\
+  -H "Content-Type: application/json" -d '{}'
+
+# 2. On the VPS, register and run (outbound-only, no open ports):
+sudo ./deploydock-agent register \\
+  --server http://your-deploydock:8000 \\
+  --token dck_rt_...
+sudo ./deploydock-agent run
+
+# 3. Verify:
+./deploydock-agent doctor`}</code>
+            </pre>
+          </article>
+        </div>
+      </section>
+
       <section className="docs-section" aria-labelledby="guardrails-title">
         <div className="section-heading">
           <div>

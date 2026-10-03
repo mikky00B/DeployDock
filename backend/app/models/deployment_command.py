@@ -2,12 +2,14 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, JSON
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Uuid
 
 from app.db.base import Base
 from app.models.base import TimestampMixin, UUIDPrimaryKeyMixin
+
+ACTIVE_COMMAND_STATUSES_SQL = "status IN ('queued', 'claimed')"
 
 
 class AgentCommandKind(str, enum.Enum):
@@ -37,6 +39,16 @@ class DeploymentCommand(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_deployment_commands_agent_status", "agent_id", "status"),
         Index("ix_deployment_commands_deployment_id", "deployment_id"),
+        # At most one live command per deployment: two dispatch calls racing
+        # (webhook + promotion) must not hand the agent the same deploy twice.
+        # Mirrors the one-active-deployment guard on `deployments`.
+        Index(
+            "uq_deployment_commands_active_per_deployment",
+            "deployment_id",
+            unique=True,
+            postgresql_where=text(ACTIVE_COMMAND_STATUSES_SQL),
+            sqlite_where=text(ACTIVE_COMMAND_STATUSES_SQL),
+        ),
     )
 
     agent_id: Mapped[uuid.UUID] = mapped_column(

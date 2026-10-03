@@ -1,6 +1,9 @@
 import asyncio
+import itertools
+import logging
 import shlex
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -28,13 +31,14 @@ class DeploymentRunner:
         self.sessionmaker = sessionmaker
         self.settings = settings
         self.ssh_service = ssh_service
-        # Monotonic log line counter for the deployment currently being run.
-        # A single runner owns a deployment end to end, so a local counter is both
-        # correct and O(1) - unlike len(deployment.logs), which was O(n) per line.
-        self._sequence = 0
+        # Strong references to spawned follow-up tasks: a refless task can be
+        # garbage-collected mid-flight, and its exception would be invisible.
+        self._spawned_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self, deployment_id: uuid.UUID) -> None:
-        self._sequence = 0
+        # Monotonic per-deployment log counter — local to run() so two runs on
+        # the same instance can never share (or reset) each other's cursor.
+        sequence = itertools.count(1)
         async with self.sessionmaker() as session:
             deployment = await self._get_deployment(session, deployment_id)
             app = deployment.app
@@ -49,14 +53,19 @@ class DeploymentRunner:
                     session,
                     deployment,
                     DeploymentLogStream.system,
-                    "Deployment canceled before start",
-                )
+                    "Deployment canceled before start", sequence)
                 await session.commit()
                 return
 
             deployment.status = DeploymentStatus.running
             deployment.started_at = started_at
-            await self._add_log(session, deployment, DeploymentLogStream.system, "Deployment started")
+            await self._add_log(
+                session,
+                deployment,
+                DeploymentLogStream.system,
+                "Deployment started",
+                sequence,
+            )
             await session.commit()
             deployment_event_bus.notify(deployment.id)
 
@@ -70,8 +79,7 @@ class DeploymentRunner:
                         session,
                         deployment,
                         DeploymentLogStream.system,
-                        f"Previous commit: {previous_commit}",
-                    )
+                        f"Previous commit: {previous_commit}", sequence)
 
                 result = await self.ssh_service.run_command(
                     host=server.host,
@@ -82,7 +90,7 @@ class DeploymentRunner:
                     known_host_key=server.known_host_key,
                     timeout_seconds=self.settings.deploy_timeout_seconds,
                 )
-                await self._save_command_output(session, deployment, result)
+                await self._save_command_output(session, deployment, result, sequence)
                 await session.commit()
                 deployment_event_bus.notify(deployment.id)
 
@@ -98,6 +106,7 @@ class DeploymentRunner:
                         deployment,
                         DeploymentLogStream.system,
                         "Deployment canceled; ignoring the result of the command that was already running",
+                        sequence,
                     )
                     await create_audit_log(
                         session,
@@ -113,8 +122,7 @@ class DeploymentRunner:
                     app.current_commit = deployment.commit_sha
                     app.last_successful_commit = deployment.commit_sha
                     await self._add_log(
-                        session, deployment, DeploymentLogStream.system, "Deployment succeeded"
-                    )
+                        session, deployment, DeploymentLogStream.system, "Deployment succeeded", sequence)
                     await create_audit_log(
                         session,
                         current_user=deployment.owner,
@@ -128,7 +136,13 @@ class DeploymentRunner:
                     # overwrite it with "failed" here.
                     deployment.status = DeploymentStatus.failed
                     deployment.error_message = result.stderr.strip() or "Deployment command failed"
-                    await self._add_log(session, deployment, DeploymentLogStream.system, "Deployment failed")
+                    await self._add_log(
+                        session,
+                        deployment,
+                        DeploymentLogStream.system,
+                        "Deployment failed",
+                        sequence,
+                    )
                     await create_audit_log(
                         session,
                         current_user=deployment.owner,
@@ -148,8 +162,7 @@ class DeploymentRunner:
                         session,
                         deployment,
                         DeploymentLogStream.system,
-                        deployment.error_message,
-                    )
+                        deployment.error_message, sequence)
                     await create_audit_log(
                         session,
                         current_user=deployment.owner,
@@ -167,7 +180,7 @@ class DeploymentRunner:
                 await self._promote_next_queued(session, deployment)
 
     async def run_rollback(self, deployment_id: uuid.UUID) -> None:
-        self._sequence = 0
+        sequence = itertools.count(1)
         async with self.sessionmaker() as session:
             deployment = await self._get_deployment(session, deployment_id)
             app = deployment.app
@@ -183,14 +196,13 @@ class DeploymentRunner:
                     session,
                     deployment,
                     DeploymentLogStream.system,
-                    "Rollback canceled before start",
-                )
+                    "Rollback canceled before start", sequence)
                 await session.commit()
                 return
 
             deployment.status = DeploymentStatus.running
             deployment.started_at = started_at
-            await self._add_log(session, deployment, DeploymentLogStream.system, "Rollback started")
+            await self._add_log(session, deployment, DeploymentLogStream.system, "Rollback started", sequence)
             await session.commit()
             deployment_event_bus.notify(deployment.id)
 
@@ -199,7 +211,13 @@ class DeploymentRunner:
                 deployment.error_message = "Rollback target commit is missing"
                 deployment.finished_at = datetime.now(UTC)
                 deployment.duration_seconds = 0
-                await self._add_log(session, deployment, DeploymentLogStream.system, deployment.error_message)
+                await self._add_log(
+                    session,
+                    deployment,
+                    DeploymentLogStream.system,
+                    deployment.error_message,
+                    sequence,
+                )
                 await session.commit()
                 return
 
@@ -215,7 +233,7 @@ class DeploymentRunner:
                     known_host_key=server.known_host_key,
                     timeout_seconds=self.settings.rollback_timeout_seconds,
                 )
-                await self._save_command_output(session, deployment, result)
+                await self._save_command_output(session, deployment, result, sequence)
                 await session.commit()
                 deployment_event_bus.notify(deployment.id)
 
@@ -228,16 +246,29 @@ class DeploymentRunner:
                         deployment,
                         DeploymentLogStream.system,
                         "Rollback canceled; ignoring the result of the command that was already running",
+                        sequence,
                     )
                 elif result.exit_code == 0:
                     deployment.status = DeploymentStatus.success
                     deployment.commit_sha = target_commit
                     app.current_commit = target_commit
-                    await self._add_log(session, deployment, DeploymentLogStream.system, "Rollback succeeded")
+                    await self._add_log(
+                        session,
+                        deployment,
+                        DeploymentLogStream.system,
+                        "Rollback succeeded",
+                        sequence,
+                    )
                 else:
                     deployment.status = DeploymentStatus.failed
                     deployment.error_message = result.stderr.strip() or "Rollback command failed"
-                    await self._add_log(session, deployment, DeploymentLogStream.system, "Rollback failed")
+                    await self._add_log(
+                        session,
+                        deployment,
+                        DeploymentLogStream.system,
+                        "Rollback failed",
+                        sequence,
+                    )
             except Exception as exc:
                 # Never overwrite a terminal status the API already stamped
                 # (e.g. a cancel that landed while the command was running).
@@ -249,8 +280,7 @@ class DeploymentRunner:
                         session,
                         deployment,
                         DeploymentLogStream.system,
-                        deployment.error_message,
-                    )
+                        deployment.error_message, sequence)
             finally:
                 finished_at = datetime.now(UTC)
                 deployment.finished_at = finished_at
@@ -282,7 +312,28 @@ class DeploymentRunner:
         except Exception:  # noqa: BLE001
             dispatched = False
         if not dispatched:
-            asyncio.create_task(self.run(promoted.id))
+            self._spawn_follow_up(promoted.id)
+
+    def _spawn_follow_up(self, deployment_id: uuid.UUID) -> None:
+        """Spawn a follow-up run with a strong reference and visible errors.
+
+        A bare asyncio.create_task result can be garbage-collected mid-flight
+        and its exception is never retrieved — both classic asyncio footguns.
+        """
+        task = asyncio.create_task(self.run(deployment_id))
+        self._spawned_tasks.add(task)
+        task.add_done_callback(self._on_follow_up_done)
+
+    def _on_follow_up_done(self, task: asyncio.Task[None]) -> None:
+        self._spawned_tasks.discard(task)
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logging.getLogger("deploydock.runner").error(
+                "Follow-up deployment task failed",
+                exc_info=exception,
+            )
 
     async def _get_deployment(self, session: AsyncSession, deployment_id: uuid.UUID) -> Deployment:
         result = await session.execute(
@@ -337,11 +388,12 @@ class DeploymentRunner:
         session: AsyncSession,
         deployment: Deployment,
         result: SSHCommandResult,
+        sequence: Iterator[int],
     ) -> None:
         for line in result.stdout.splitlines():
-            await self._add_log(session, deployment, DeploymentLogStream.stdout, line)
+            await self._add_log(session, deployment, DeploymentLogStream.stdout, line, sequence)
         for line in result.stderr.splitlines():
-            await self._add_log(session, deployment, DeploymentLogStream.stderr, line)
+            await self._add_log(session, deployment, DeploymentLogStream.stderr, line, sequence)
 
     async def _add_log(
         self,
@@ -349,14 +401,13 @@ class DeploymentRunner:
         deployment: Deployment,
         stream: DeploymentLogStream,
         line: str,
+        sequence: Iterator[int],
     ) -> None:
-        self._sequence += 1
-        sequence = self._sequence
         log = DeploymentLog(
             deployment_id=deployment.id,
             stream=stream,
             line=line,
-            sequence=sequence,
+            sequence=next(sequence),
         )
         deployment.logs.append(log)
         session.add(log)

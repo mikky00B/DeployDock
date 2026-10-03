@@ -53,8 +53,12 @@ location /api/ {
 }
 ```
 
-`X-Real-IP` matters: without it every login attempt appears to come from the
-proxy, and the per-IP rate-limit bucket becomes useless.
+`TRUST_PROXY_HEADERS=true` matters behind a proxy: with it set, the API reads
+the client address from `X-Forwarded-For` (which nginx sets via the
+`proxy_set_header` lines above), so rate-limiting buckets are per real client.
+Without it — the default, deliberately — every request appears to come from
+the proxy, and the per-IP buckets collapse into one. Do not enable it when the
+API is exposed directly, because the header can then be spoofed.
 
 ## Migrations
 
@@ -66,13 +70,17 @@ alembic history               # list
 alembic current               # what is applied
 ```
 
-Migration `0005` creates the partial unique index enforcing one active
-deployment per app. It first marks any leftover non-terminal deployments as
-failed, since the index cannot be created while duplicates exist. If you have
-in-flight deploys, stop the API before migrating.
+Two migrations create data-protecting constraints and both first make existing
+data satisfy them: `0005` creates the original partial unique index enforcing
+one active deployment per app, and `0012` widens that index to every
+dispatchable pipeline status and adds the one-live-command-per-deployment
+guard — in both cases marking leftover duplicates as failed first, since the
+index cannot be created while they exist. If you have in-flight deploys, stop
+the API before migrating.
 
-CI runs `upgrade head`, `downgrade base`, `upgrade head` against real PostgreSQL
-on every pull request, so a migration that cannot be rolled back fails there.
+CI runs `upgrade head`, `downgrade base`, `upgrade head`, plus the
+concurrency-guard tests against real PostgreSQL on every pull request, so a
+migration that cannot be rolled back or enforced fails there.
 
 ## Rotating the encryption key
 
@@ -125,10 +133,13 @@ pg_dump --format=custom --file=deploydock-$(date +%F).dump "$DATABASE_URL_LIBPQ"
 | --- | --- |
 | `GET /health` | Process is up |
 | `GET /health/ready` | Database is reachable (503 when not) |
+| `GET /metrics` | Prometheus metrics: deployments per status, durations, servers/apps gauges, agents online |
 | Startup log `Marked N interrupted deployment(s) as failed` | The API restarted mid-deploy; check the server's real state |
+| Startup or periodic log `Reclaimed N expired agent command(s)` | An agent died mid-deploy; its deployment was failed automatically |
 | Startup log `No REDIS_URL configured` | Rate limiting is per-process |
+| Startup log `Running with default development keys` | Public default secrets are in use; set real ones before exposing |
 | Audit rows `server.host_key_pinned` | A host key was re-pinned — confirm it was expected |
-| Deployments stuck `running` past your longest deploy | The runner died; the next startup sweep reclaims them |
+| Deployments stuck in a pipeline status past your longest deploy | The agent or runner died; the sweeps reclaim them (startup for SSH-bridge orphans, periodic for expired agent leases) |
 
 Logging is configured in `app/core/logging.py` and keyed off `APP_ENV`.
 
@@ -143,4 +154,4 @@ Logging is configured in `app/core/logging.py` and keyed off `APP_ENV`.
 | Deploy returns 409 | Another deployment for that app is in flight |
 | Deploy returns 409 with a host key message | Host key mismatch or not pinned; see [Server onboarding](server-onboarding.md) |
 | Logs arrive in bursts, not live | Proxy buffering is on for the stream path |
-| Rate limiting seems not to work | Multiple workers without `REDIS_URL`, or the proxy is not forwarding the client IP |
+| Rate limiting seems not to work | Multiple workers without `REDIS_URL`, or the proxy is not forwarding `X-Forwarded-For` while `TRUST_PROXY_HEADERS` is off |

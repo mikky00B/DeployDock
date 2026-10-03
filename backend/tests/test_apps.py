@@ -304,7 +304,10 @@ def test_service_status_returns_safe_error_when_ssh_fails(app_client) -> None:
     response = client.get(f"/api/v1/apps/{created['id']}/status", headers=headers)
 
     assert response.status_code == 502
-    assert response.json()["detail"] == "SSH command failed: connection refused"
+    detail = response.json()["detail"]
+    assert detail.startswith("Could not run the command on 203.0.113.10:")
+    # Library exception internals must not leak into the response.
+    assert "connection refused" not in detail
 
 
 def test_service_operations_are_owner_scoped(app_client) -> None:

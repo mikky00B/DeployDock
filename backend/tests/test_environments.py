@@ -12,7 +12,7 @@ from app.core.encryption import decrypt_text
 from app.db.base import Base
 from app.db.session import get_db_session
 from app.main import app
-from app.models import Environment, EnvironmentVariable
+from app.models import EnvironmentVariable
 
 TEST_PRIVATE_KEY = """-----BEGIN OPENSSH PRIVATE KEY-----
 test-private-key

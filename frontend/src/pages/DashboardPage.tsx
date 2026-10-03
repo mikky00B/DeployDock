@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { getDashboard } from "../api/dashboard";
 import { CodeValue, EmptyState, formatDateTime, humanizeToken, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
-import { navigateTo } from "../routes";
+import { navigateTo, type AppRoute } from "../routes";
 import type { Dashboard } from "../types/dashboard";
 import { deploymentStatusTone } from "./DeploymentsPage";
 
@@ -59,6 +59,7 @@ export function DashboardPage() {
           title="Recent deployments"
           action={<button className="link-button" type="button" onClick={() => navigateTo("/deployments")}>View all deployments</button>}
           emptyText="No deployments yet. Trigger your first deployment from an app page."
+          emptyAction={{ label: "Go to your apps", route: "/apps" }}
         >
           {dashboard.recent_deployments.map((deployment) => (
             <button className="activity-row" key={deployment.id} type="button" onClick={() => navigateTo(`/deployments/${deployment.id}`)}>
@@ -83,7 +84,11 @@ export function DashboardPage() {
           ))}
         </DashboardPanel>
 
-        <DashboardPanel title="Servers" emptyText="No servers yet. Connect your first VPS to start deploying.">
+        <DashboardPanel
+          title="Servers"
+          emptyText="No servers yet. Connect your first VPS to start deploying."
+          emptyAction={{ label: "Add your first server", route: "/servers" }}
+        >
           {dashboard.recent_servers.map((server) => (
             <button className="activity-row" key={server.id} type="button" onClick={() => navigateTo("/servers")}>
               <div>
@@ -95,7 +100,11 @@ export function DashboardPage() {
           ))}
         </DashboardPanel>
 
-        <DashboardPanel title="Apps" emptyText="No apps yet. Register an existing app path on one of your servers.">
+        <DashboardPanel
+          title="Apps"
+          emptyText="No apps yet. Register an existing app path on one of your servers."
+          emptyAction={{ label: "Register your first app", route: "/apps" }}
+        >
           {dashboard.recent_apps.map((app) => (
             <button className="activity-row" key={app.id} type="button" onClick={() => navigateTo(`/apps/${app.id}`)}>
               <div>
@@ -133,11 +142,13 @@ function SummaryCard({
 function DashboardPanel({
   title,
   emptyText,
+  emptyAction,
   action,
   children,
 }: {
   title: string;
   emptyText: string;
+  emptyAction?: { label: string; route: AppRoute };
   action?: ReactNode;
   children: ReactNode;
 }) {
@@ -149,7 +160,23 @@ function DashboardPanel({
         <h2>{title}</h2>
         {action}
       </div>
-      {hasChildren ? <div className="activity-list">{children}</div> : <EmptyState title={title === "Recent deployments" ? "No deployments yet" : "Nothing to show yet"} body={emptyText} />}
+      {hasChildren ? (
+        <div className="activity-list">{children}</div>
+      ) : (
+        <div>
+          <EmptyState title={title === "Recent deployments" ? "No deployments yet" : "Nothing to show yet"} body={emptyText} />
+          {emptyAction ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => navigateTo(emptyAction.route)}
+              style={{ marginTop: 12 }}
+            >
+              {emptyAction.label}
+            </button>
+          ) : null}
+        </div>
+      )}
     </section>
   );
 }

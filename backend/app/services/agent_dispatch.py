@@ -6,12 +6,14 @@ polling. The agent never queries for context — the payload embeds everything
 needed to execute (spec §77 criterion 17).
 """
 
+import logging
 import re
 import secrets
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -19,10 +21,21 @@ from app.models import (
     AgentCommandKind,
     AgentCommandStatus,
     App,
+    AuditLog,
     Deployment,
     DeploymentCommand,
+    DeploymentLog,
+    DeploymentLogStream,
+    User,
 )
-from app.models.deployment import DeploymentKind
+from app.models.deployment import (
+    DISPATCHABLE_DEPLOYMENT_STATUSES,
+    TERMINAL_DEPLOYMENT_STATUSES,
+    DeploymentKind,
+    DeploymentStatus,
+)
+
+logger = logging.getLogger("deploydock.agent_dispatch")
 
 
 def slugify_container_base(name: str) -> str:
@@ -74,7 +87,13 @@ async def enqueue_deployment_command(
     agent: Agent,
     deployment: Deployment,
     app: App,
-) -> DeploymentCommand:
+) -> bool:
+    """Enqueue a command for the agent. False when one is already live.
+
+    The partial unique index on (deployment_id) for queued/claimed commands is
+    the authority: two dispatch calls racing (webhook vs promotion) resolve to
+    a single command at the database, not in application code.
+    """
     command = DeploymentCommand(
         agent_id=agent.id,
         deployment_id=deployment.id,
@@ -83,13 +102,23 @@ async def enqueue_deployment_command(
         else AgentCommandKind.deploy,
         payload=build_command_payload(app, deployment),
     )
+    deployment_id = deployment.id
     session.add(command)
-    await session.flush()
-    return command
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        logger.info(
+            "Deployment %s already has a live command; skipping duplicate dispatch",
+            deployment_id,
+        )
+        return False
+    return True
 
 
 async def dispatch_deployment(session: AsyncSession, *, deployment: Deployment) -> bool:
-    """Route a deployment to its server's agent. True when enqueued.
+    """Route a deployment to its server's agent. True when enqueued (or when a
+    live command already exists for it).
 
     Returns False when the server has no active agent, so the caller can fall
     back to the SSH bridge runner (spec §8: keep the old path until the agent
@@ -101,9 +130,9 @@ async def dispatch_deployment(session: AsyncSession, *, deployment: Deployment) 
     agent = await find_agent_for_server(session, server_id=deployment.server_id)
     if agent is None:
         return False
-    await enqueue_deployment_command(session, agent=agent, deployment=deployment, app=app)
+    enqueued = await enqueue_deployment_command(session, agent=agent, deployment=deployment, app=app)
     await session.commit()
-    return True
+    return enqueued or True
 
 
 async def claim_next_command(
@@ -179,6 +208,107 @@ async def complete_command(
     return command
 
 
+async def reclaim_stale_commands(session: AsyncSession, *, lease_seconds: int) -> int:
+    """Reclaim commands whose agent lease expired (spec §2.5 gap fix).
+
+    An agent that claims a command and then dies (OOM, kill -9, network
+    partition) would otherwise leave the command claimed and the deployment in
+    a pipeline stage forever, blocking the app's next deploy. Expired claims
+    fail the command and its deployment (unless already terminal), then the
+    queue promotion runs so a waiting deployment can proceed.
+
+    Called from the startup sweep and a periodic background task in main.py.
+    """
+    from app.services.deployment_events import deployment_event_bus
+
+    cutoff = datetime.now(UTC) - timedelta(seconds=lease_seconds)
+    result = await session.execute(
+        select(DeploymentCommand)
+        .where(
+            DeploymentCommand.status == AgentCommandStatus.claimed,
+            DeploymentCommand.claimed_at <= cutoff,
+        )
+    )
+    stale = list(result.scalars().all())
+    if not stale:
+        return 0
+
+    affected_app_ids: set[uuid.UUID] = set()
+    notified_deployments: list[uuid.UUID] = []
+    for command in stale:
+        command.status = AgentCommandStatus.failed
+        command.error_message = "Agent lease expired; the agent never reported a result."
+        command.completed_at = datetime.now(UTC)
+
+        deployment = await session.get(Deployment, command.deployment_id)
+        if deployment is None:
+            continue
+        if deployment.status not in TERMINAL_DEPLOYMENT_STATUSES:
+            deployment.status = DeploymentStatus.failed
+            deployment.error_message = (
+                "The agent stopped responding during this deployment and the "
+                "command lease expired. It has been marked failed automatically."
+            )
+            deployment.finished_at = datetime.now(UTC)
+            if deployment.started_at is not None:
+                deployment.duration_seconds = max(
+                    0,
+                    int((deployment.finished_at - _as_utc(deployment.started_at)).total_seconds()),
+                )
+            owner = await session.get(User, deployment.owner_id)
+            if owner is not None:
+                session.add(
+                    AuditLog(
+                        owner_id=owner.id,
+                        action="deployment.failed",
+                        entity_type="deployment",
+                        entity_id=str(deployment.id),
+                        metadata_json={
+                            "app_id": str(deployment.app_id),
+                            "error": "agent command lease expired",
+                        },
+                    )
+                )
+            session.add(
+                DeploymentLog(
+                    deployment_id=deployment.id,
+                    stream=DeploymentLogStream.system,
+                    line="Agent lease expired; deployment marked failed",
+                    sequence=await _next_sequence(session, deployment.id),
+                )
+            )
+            affected_app_ids.add(deployment.app_id)
+        notified_deployments.append(deployment.id)
+
+    await session.commit()
+    for deployment_id in notified_deployments:
+        deployment_event_bus.notify(deployment_id)
+    for app_id in affected_app_ids:
+        promoted = await promote_next_queued_deployment(session, app_id=app_id)
+        if promoted is not None:
+            await dispatch_deployment(session, deployment=promoted)
+
+    logger.warning("Reclaimed %s expired agent command(s)", len(stale))
+    return len(stale)
+
+
+async def _next_sequence(session: AsyncSession, deployment_id: uuid.UUID) -> int:
+    from sqlalchemy import func
+
+    from app.models import DeploymentLog
+
+    current = await session.scalar(
+        select(func.max(DeploymentLog.sequence)).where(DeploymentLog.deployment_id == deployment_id)
+    )
+    return (current or 0) + 1
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
 async def get_owned_deployment_for_agent(
     session: AsyncSession,
     *,
@@ -214,7 +344,6 @@ async def promote_next_queued_deployment(
     unique index.
     """
     from app.models.deployment import (
-        DISPATCHABLE_DEPLOYMENT_STATUSES,
         DeploymentStatus,
     )
 

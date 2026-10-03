@@ -10,6 +10,9 @@ export type DeployableApp = {
   deploy_command: string;
   restart_command: string | null;
   healthcheck_url: string | null;
+  port: number | null;
+  cpu_limit: string | null;
+  memory_limit: string | null;
   current_commit: string | null;
   last_successful_commit: string | null;
   created_at: string;
@@ -26,6 +29,9 @@ export type AppPayload = {
   deploy_command: string;
   restart_command?: string | null;
   healthcheck_url?: string | null;
+  port?: number | null;
+  cpu_limit?: string | null;
+  memory_limit?: string | null;
 };
 
 export type AppServiceStatus = {

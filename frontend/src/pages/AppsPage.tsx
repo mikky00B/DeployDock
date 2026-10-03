@@ -41,6 +41,9 @@ const emptyAppForm: AppPayload = {
   deploy_command: "",
   restart_command: "",
   healthcheck_url: "",
+  port: null,
+  cpu_limit: "",
+  memory_limit: "",
 };
 
 export function AppsPage() {
@@ -456,6 +459,31 @@ function AppForm({
         <span className="field-helper">Runs from the app path. Whitespace and line breaks are preserved.</span>
       </label>
       <label>Restart command<textarea className="command-textarea" rows={4} placeholder="sudo systemctl restart my-app" value={form.restart_command ?? ""} onChange={(event) => onChange({ ...form, restart_command: event.target.value })} /></label>
+      <label>
+        Container port
+        <input
+          type="number"
+          min={1}
+          max={65535}
+          placeholder="8080"
+          value={form.port ?? ""}
+          onChange={(event) => onChange({ ...form, port: event.target.value === "" ? null : Number(event.target.value) })}
+        />
+        <span className="field-helper">
+          The TCP port your app listens on inside its container. Required for agent-driven deployments; ignored by the SSH
+          workflow.
+        </span>
+      </label>
+      <label>
+        CPU limit
+        <input placeholder="1.5" value={form.cpu_limit ?? ""} onChange={(event) => onChange({ ...form, cpu_limit: event.target.value })} />
+        <span className="field-helper">Optional, agent deployments only. Docker --cpus value, e.g. 1.5.</span>
+      </label>
+      <label>
+        Memory limit
+        <input placeholder="512m" value={form.memory_limit ?? ""} onChange={(event) => onChange({ ...form, memory_limit: event.target.value })} />
+        <span className="field-helper">Optional, agent deployments only. Docker --memory value, e.g. 512m or 1g.</span>
+      </label>
       <button className="primary-button" disabled={isSubmitting || servers.length === 0} type="submit">
         {isSubmitting ? "Saving" : submitLabel}
       </button>
@@ -836,6 +864,9 @@ function appToForm(deployableApp: DeployableApp): AppPayload {
     deploy_command: deployableApp.deploy_command,
     restart_command: deployableApp.restart_command ?? "",
     healthcheck_url: deployableApp.healthcheck_url ?? "",
+    port: deployableApp.port ?? null,
+    cpu_limit: deployableApp.cpu_limit ?? "",
+    memory_limit: deployableApp.memory_limit ?? "",
   };
 }
 

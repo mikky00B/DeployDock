@@ -43,5 +43,8 @@ function cleanAppPayload(payload: AppPayload) {
     service_name: payload.service_name || null,
     restart_command: payload.restart_command || null,
     healthcheck_url: payload.healthcheck_url || null,
+    port: payload.port || null,
+    cpu_limit: payload.cpu_limit || null,
+    memory_limit: payload.memory_limit || null,
   };
 }

@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import Annotated
 
@@ -25,6 +26,8 @@ from app.services.server_service import (
     update_server,
 )
 from app.services.ssh_service import SSHService, get_ssh_service
+
+logger = logging.getLogger("deploydock.servers")
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -132,11 +135,17 @@ async def repin_host_key(
             current_user=current_user,
             ssh_service=ssh_service,
         )
-    except Exception as exc:
+    except Exception:
+        # Library exception text can carry paths and internals; log it here and
+        # return a stable message to the client.
+        logger.exception("Could not read host key from %s:%s", server.host, server.port)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Could not read host key from {server.host}:{server.port}: {exc}",
-        ) from exc
+            detail=(
+                f"Could not read a host key from {server.host}:{server.port}. Check that "
+                "the server is reachable and SSH is running, then try again."
+            ),
+        ) from None
 
     return ServerHostKeyRead(
         fingerprint=host_key.fingerprint,

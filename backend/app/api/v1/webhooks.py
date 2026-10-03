@@ -1,4 +1,6 @@
 import json
+import logging
+import secrets
 import uuid
 from typing import Annotated
 
@@ -7,11 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
+from app.core.secrets import decrypt_secret, encrypt_secret
 from app.db.session import get_db_session, get_sessionmaker
 from app.models import User, WebhookDeliveryResult
 from app.schemas.deployment import DeploymentRead
 from app.services.agent_dispatch import dispatch_deployment
 from app.services.app_service import get_app_for_user
+from app.services.ssh_service import SSHService, get_ssh_service
 from app.services.webhook_service import (
     delivery_already_processed,
     extract_commit_sha,
@@ -22,12 +26,9 @@ from app.services.webhook_service import (
     verify_signature,
     webhook_owner_for_app,
 )
-from app.services.ssh_service import SSHService, get_ssh_service
 from app.workers.deployment_runner import DeploymentRunner
 
-import secrets
-
-from app.core.encryption import encrypt_text
+logger = logging.getLogger("deploydock.webhooks")
 
 router = APIRouter(tags=["webhooks"])
 
@@ -42,9 +43,7 @@ async def create_webhook_secret(
     """Mint the app's GitHub webhook secret (shown once, encrypted at rest)."""
     app = await get_app_for_user(session, app_id=app_id, current_user=current_user)
     secret = "whsec_" + secrets.token_urlsafe(32)
-    app.encrypted_webhook_secret = encrypt_text(
-        secret, settings.encryption_key, key_id=settings.encryption_key_id
-    )
+    app.encrypted_webhook_secret = encrypt_secret(secret, settings)
     await session.commit()
     return {"webhook_secret": secret, "header": "X-Hub-Signature-256"}
 
@@ -128,16 +127,13 @@ async def github_webhook(
     for app in branch_match:
         if not app.encrypted_webhook_secret:
             continue
-        from app.core.encryption import decrypt_text
-
         try:
-            secret = decrypt_text(
-                app.encrypted_webhook_secret,
-                settings.encryption_key,
-                key_id=settings.encryption_key_id,
-                retired_keys=settings.retired_encryption_keys,
-            )
+            secret = decrypt_secret(app.encrypted_webhook_secret, settings)
         except Exception:  # noqa: BLE001 - undecryptable secret = unverifiable app
+            logger.warning(
+                "Could not decrypt the webhook secret for app %s; skipping it",
+                app.id,
+            )
             continue
         if verify_signature(secret=secret, signature_header=x_hub_signature_256, raw_body=raw_body):
             verified_app = app
@@ -163,7 +159,6 @@ async def github_webhook(
         commit_message=head_message,
         commit_sha=commit_sha,
         current_user=owner,
-        settings=settings,
     )
     if deployment.status.value == "pending":
         dispatched = await dispatch_deployment(session, deployment=deployment)
@@ -186,4 +181,5 @@ async def github_webhook(
         result=result,
         detail=f"deployment {deployment.id}",
     )
-    return DeploymentRead.model_validate(deployment).model_dump(mode="json") | {"webhook_result": result.value}
+    response = DeploymentRead.model_validate(deployment).model_dump(mode="json")
+    return response | {"webhook_result": result.value}

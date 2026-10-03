@@ -12,11 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
-from app.core.encryption import decrypt_text, encrypt_text
 from app.db.base import Base
 from app.db.session import get_db_session, get_sessionmaker
 from app.main import app
-from app.models import App, Deployment, User, WebhookDelivery
+from app.models import App, Deployment, User
 from app.models.deployment import DeploymentStatus
 from app.services.ssh_service import SSHCommandResult, get_ssh_service
 

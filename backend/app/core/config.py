@@ -39,6 +39,17 @@ class Settings(BaseSettings):
         alias="AGENT_REGISTRATION_TOKEN_TTL_SECONDS",
     )
     agent_offline_after_seconds: int = Field(default=90, alias="AGENT_OFFLINE_AFTER_SECONDS")
+    # A claimed command older than this is assumed lost (agent died mid-deploy):
+    # the sweep fails the command and its deployment so the app is not blocked.
+    # Must exceed the longest legitimate deploy (DEPLOY_TIMEOUT_SECONDS).
+    agent_command_lease_seconds: int = Field(default=1800, alias="AGENT_COMMAND_LEASE_SECONDS")
+    agent_reclaim_sweep_seconds: int = Field(default=300, alias="AGENT_RECLAIM_SWEEP_SECONDS")
+    # Trust X-Forwarded-For for client IP resolution (rate limiting, audit).
+    # Only enable behind a reverse proxy you control, otherwise clients can
+    # spoof their address.
+    trust_proxy_headers: bool = Field(default=False, alias="TRUST_PROXY_HEADERS")
+    register_max_attempts: int = Field(default=10, alias="REGISTER_MAX_ATTEMPTS")
+    register_window_seconds: int = Field(default=3600, alias="REGISTER_WINDOW_SECONDS")
 
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", env_file_encoding="utf-8")
 
