@@ -35,8 +35,9 @@ A deploy records:
 ## One deployment at a time, per app
 
 Two concurrent deploys of the same app would fight over the same checkout, so
-DeployDock allows at most one non-terminal (`pending` or `running`) deployment
-per app. A second attempt returns:
+DeployDock allows at most one *dispatchable* deployment per app — any active
+status except `queued` (pending, running, cloning, building, testing,
+deploying, health_check). A second attempt returns:
 
 ```json
 HTTP 409
@@ -48,25 +49,57 @@ message above, and a partial unique index in the database settles races between
 two API workers that check at the same instant. Rollbacks are subject to the
 same guard.
 
-Different apps deploy in parallel freely, including apps on the same server.
+Automatic deploys (GitHub webhooks) are the exception: a push that arrives
+while a deployment is active is **queued** (spec §42) and starts automatically
+when the active one turns terminal — success, failure, cancellation, or
+rollback. Different apps deploy in parallel freely, including apps on the same
+server.
+
+## Cancel
+
+A non-terminal deployment can be canceled from the deployment page or via
+`POST /api/v1/deployments/{id}/cancel`. Canceling is immediate on the record,
+idempotent while already canceled, and refused (`409`) for other terminal
+states. The SSH bridge honors a cancel at its next checkpoint (it cannot
+interrupt a command that is already executing); the agent path reports results
+that never overwrite a canceled status. Whatever was queued behind the canceled
+deployment is promoted and started.
+
+## Execution paths
+
+The same deployment record is served by two engines:
+
+- **SSH bridge** (no agent installed): the backend runs your deploy command in
+  the app path over SSH, as described below.
+- **Agent** (registered via the server page): the backend enqueues a command;
+  the Go agent clones the repository, builds a Docker image, starts the new
+  container on an internal port, probes the health check, rewrites its managed
+  nginx config, switches traffic, and only then stops the old container. The
+  deployment's status follows the agent's stage events, so the dashboard shows
+  cloning → building → deploying → health_check as they happen.
+
+Agent-driven deploys require the app's container **port** to be set, and
+optionally CPU/memory limits.
 
 ## Interrupted deployments
 
-Deployments currently run inside the API process (FastAPI background tasks). If
-that process restarts mid-deploy, the row would otherwise stay `running`
+SSH-bridge deployments run inside the API process (FastAPI background tasks).
+If that process restarts mid-deploy, the row would otherwise stay `running`
 forever — and, because of the guard above, block every future deploy of that
 app.
 
-At startup DeployDock sweeps deployments that are still `pending` or `running`
-and older than `ORPHAN_DEPLOYMENT_TIMEOUT_SECONDS` (default 1 hour), marks them
-`failed`, and records why. The API logs a warning naming how many it reclaimed.
+At startup DeployDock sweeps deployments that are still active and older than
+`ORPHAN_DEPLOYMENT_TIMEOUT_SECONDS` (default 1 hour), marks them `failed`, and
+records why. The API logs a warning naming how many it reclaimed.
 
-Note what this does **not** do: it cannot stop the shell command that was
-already running on the target server. If a deploy was interrupted halfway, check
-the server's actual state before re-deploying.
+The agent path has its own failure mode: an agent that claims a command and
+dies. Commands carry a lease (`AGENT_COMMAND_LEASE_SECONDS`, default 30
+minutes); a periodic sweep fails expired claims and their deployments, then
+promotes whatever was queued — no API restart required.
 
-Moving the runner into a dedicated worker process is on the roadmap; it is the
-proper fix for this whole class of problem.
+Note what this does **not** do: neither sweep can stop work already executing
+on the target server. If a deploy was interrupted halfway, check the server's
+actual state before re-deploying.
 
 ## Log streaming
 
@@ -100,7 +133,9 @@ so a reconnect that replays lines does not double them up.
 ## Rollback
 
 A rollback targets the most recent *successful* commit for the app, excluding
-the deployment you rolled back from. It runs:
+the deployment you rolled back from.
+
+On the SSH bridge it runs:
 
 ```bash
 bash -lc 'set -e
@@ -110,20 +145,27 @@ git checkout <target_commit>
 <restart command>'
 ```
 
+On the agent path, rollback is the same staged pipeline as a deploy with the
+previous commit checked out: rebuild the image, start the new container, probe
+the health check, switch traffic, stop the old container — so the current
+release keeps serving until the rollback is verified.
+
 The restart command is the app's `restart_command`, or
 `sudo systemctl restart <service_name>` if only a service name is set. An app
 with neither cannot be rolled back, and the API says so (`400`).
 
 Rollback is recorded as its own deployment with `kind: "rollback"`, so history
-shows what happened rather than silently mutating the original record.
+shows what happened rather than silently mutating the original record. It can
+itself be canceled while in flight, and the resulting status is `rolled_back`
+in the pipeline.
 
 Limits worth knowing:
 
-- Rollback is a `git checkout`, so it reverts code, not database migrations. A
-  deploy that ran a destructive migration is not undone by a rollback.
-- It leaves the checkout in a detached HEAD state. The next normal deploy's
-  `git pull` should be a `git checkout <branch> && git pull` if your deploy
-  command assumes it is on a branch.
+- Rollback reverts code, not database migrations. A deploy that ran a
+  destructive migration is not undone by a rollback.
+- On the SSH bridge it leaves the checkout in a detached HEAD state. The next
+  normal deploy's `git pull` should be a `git checkout <branch> && git pull` if
+  your deploy command assumes it is on a branch.
 
 ## Service control
 
@@ -154,6 +196,9 @@ These actions are recorded with the acting user, entity, and metadata:
 server.created            server.connection_tested   server.host_key_pinned
 app.created               app.updated
 deployment.started        deployment.succeeded       deployment.failed
-rollback.started
+deployment.canceled       rollback.started
 service.restarted
+agent.registered          agent.token_rotated
+environment.created       environment.variable_set   environment.variable_unset
+domain.added              domain.verified            domain.verification_failed
 ```

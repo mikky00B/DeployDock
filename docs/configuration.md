@@ -50,17 +50,26 @@ it, which is what makes rotation possible without a big-bang re-encrypt. See
 Values written before key ids existed have no prefix and are decrypted with the
 active key.
 
-### Login rate limiting
+### Rate limiting
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `REDIS_URL` | unset | Shared rate-limit counters across workers |
 | `LOGIN_MAX_ATTEMPTS` | `5` | Failed attempts per window, per account |
 | `LOGIN_WINDOW_SECONDS` | `60` | Sliding window length |
+| `REGISTER_MAX_ATTEMPTS` | `10` | Registration attempts per source address (every attempt counts) |
+| `REGISTER_WINDOW_SECONDS` | `3600` | Registration throttle window |
+| `TRUST_PROXY_HEADERS` | `false` | Honor `X-Forwarded-For` for client IP resolution |
 
-Attempts are counted in three buckets: per source IP, per account, and per
-IP+account pair. The per-IP bucket is deliberately looser (5x) because one IP
-can legitimately front many users behind NAT or a reverse proxy.
+Attempts are counted in three buckets for login: per source IP, per account,
+and per IP+account pair. The per-IP bucket is deliberately looser (5x) because
+one IP can legitimately front many users behind NAT or a reverse proxy.
+Registration is public, so every attempt counts against the source address.
+
+`TRUST_PROXY_HEADERS` only enable behind a reverse proxy you control: it makes
+`client_ip()` read the first `X-Forwarded-For` hop instead of the socket
+address. With it off (the default), a spoofed header is ignored; with it on
+behind nginx, the proxy must actually set the header.
 
 Without `REDIS_URL` the limiter is per-process and the app logs a warning at
 startup. With more than one uvicorn worker that means the effective limit is
@@ -78,6 +87,20 @@ multiplied by the worker count. Install the extra with
 Raise `DEPLOY_TIMEOUT_SECONDS` if you have genuinely slow builds. The orphan
 timeout should stay comfortably above your longest deploy, otherwise a startup
 during a long deploy could mark a live one as failed.
+
+### Agents
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HEARTBEAT_INTERVAL_SECONDS` | `30` | Cadence the server asks agents to report at |
+| `AGENT_REGISTRATION_TOKEN_TTL_SECONDS` | `900` | Lifetime of a single-use registration token |
+| `AGENT_OFFLINE_AFTER_SECONDS` | `90` | Heartbeat age after which an agent shows as offline |
+| `AGENT_COMMAND_LEASE_SECONDS` | `1800` | Age after which a claimed command is assumed lost; the sweep fails it and its deployment |
+| `AGENT_RECLAIM_SWEEP_SECONDS` | `300` | How often the expired-lease sweep runs |
+
+`AGENT_COMMAND_LEASE_SECONDS` must exceed your longest legitimate deploy
+(`DEPLOY_TIMEOUT_SECONDS`), or a healthy slow deploy would be reclaimed while
+still running.
 
 ## Frontend variables
 
@@ -110,11 +133,15 @@ secrets are actually secret.
 
 ## Secrets and app environment files
 
-DeployDock v1 is not a secrets manager. The recommendation:
+The recommendation for app runtime secrets:
 
-- Keep your app's production `.env` on the target server.
-- Use DeployDock to orchestrate deploys, restarts, logs, status, and rollback.
-- Do not store app secrets in DeployDock.
+- Keep your app's production `.env` on the target server, or use the app's
+  environment variables in DeployDock for secrets the deployment pipeline
+  itself needs.
+- Do not store app secrets in deploy commands — they end up in logs.
 
-The only secrets DeployDock holds are the SSH private keys it needs to reach
-your servers, and those are encrypted at rest.
+DeployDock encrypts what it stores at rest: SSH private keys and environment
+variables (Fernet, keyed by `ENCRYPTION_KEY`, with key ids for rotation).
+Environment variables are only ever readable in masked form through the API,
+and their values are excluded from audit logs. The decrypted values are
+reserved for deployment injection and never pass back through the API.

@@ -23,6 +23,10 @@ ruff check .          # lint
 mypy                  # types (advisory)
 pytest -q             # tests
 
+# Go (agent + CLI)
+cd go
+go build ./... && go vet ./... && go test ./...
+
 # Frontend
 cd frontend
 npm run lint
@@ -31,15 +35,22 @@ npm test
 npm run build
 ```
 
-CI runs all of these on every push and pull request, plus an Alembic
-up/down/up cycle against a real PostgreSQL service. Backend tests run on Python
-3.11 and 3.12.
+CI runs the backend and frontend checks on every push and pull request, an
+Alembic up/down/up cycle plus the PostgreSQL concurrency-guard tests against a
+real PostgreSQL service, and the Go build/vet/test suite. Backend tests run on
+Python 3.11 and 3.12.
 
 ## Tests
 
 Backend tests use pytest with `asyncio_mode = "auto"`, so `async def test_*`
-needs no decorator. They run against in-memory SQLite via `aiosqlite`; each
+needs no decorator. Most run against in-memory SQLite via `aiosqlite`; each
 fixture creates a fresh schema from `Base.metadata`.
+
+The exception is `tests/test_postgres_concurrency.py`: SQLite cannot enforce
+partial-index guards faithfully, so the database-level concurrency invariants
+(one dispatchable deployment per app, one live command per deployment) are
+tested against real PostgreSQL in the CI migrations job. The file skips
+automatically when `DATABASE_URL` is not PostgreSQL.
 
 Conventions worth following:
 
@@ -51,8 +62,9 @@ Conventions worth following:
   returns, so you cannot observe an in-flight deployment that way. Seed the
   state you need directly instead — see
   `test_deploy_is_rejected_while_another_deployment_is_active`.
-- **Reset the shared login rate limiter** in fixtures that hit `/auth/login`, or
-  attempts leak between tests.
+- **Reset the shared rate limiters** (`login_rate_limiter` and
+  `register_rate_limiter`) in fixtures that hit `/auth/*`, or attempts leak
+  between tests.
 - Prefer testing a service function directly over an HTTP round trip when the
   behaviour is not about HTTP.
 
@@ -71,7 +83,11 @@ alembic downgrade -1                   # always verify the downgrade works
 
 Revision ids in this project are descriptive, not hashes
 (e.g. `0004_add_server_known_host_key`), and `down_revision` chains them in
-order.
+order. **Keep revision ids at or under 32 characters**: Alembic records them in
+`alembic_version.version_num`, a `VARCHAR(32)`. A longer id works in tests
+(SQLite ignores varchar lengths) and then fails on every real PostgreSQL
+database — this actually happened with a 34-character id. The migration graph
+is append-only from the first external deployment onward.
 
 Two rules:
 
@@ -108,6 +124,7 @@ merely restate the code.
 | Business logic | `app/services/` |
 | Config, crypto, cross-cutting concerns | `app/core/` |
 | Anything touching SSH | `app/services/ssh_service.py`, nowhere else |
+| Agent-side execution | `go/internal/`, behind an interface (`engine/` defines them) |
 | A background operation | `app/workers/` |
 | A new page | `frontend/src/pages/`, plus a route in `routes.ts` |
 | API calls | `frontend/src/api/`, with types in `frontend/src/types/` |

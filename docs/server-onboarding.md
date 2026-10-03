@@ -107,8 +107,17 @@ you test, so a mistake does not lock you out.
 
 | Symptom | Likely cause |
 | --- | --- |
-| `Could not read host key from host:port` | The server is unreachable, SSH is on another port, or a firewall is dropping the connection |
+| `Could not read a host key from host:port` | The server is unreachable, SSH is on another port, or a firewall is dropping the connection |
 | `Host key ... does not match the pinned key` | The server changed, or the connection is being intercepted. Verify out of band before re-pinning |
 | `No host key is pinned for this server` | Run a connection test first; it pins the key |
 | `authentication failed` | The generated public key is not in `authorized_keys`, or its permissions are wrong (`700` on `.ssh`, `600` on the file) |
 | Deploy fails only on `sudo systemctl` | The sudoers entry is missing or does not match the command exactly, including the full binary path |
+
+## Alternative: install the agent
+
+The steps above set up the SSH bridge, which needs no software on the server.
+If you prefer agent-driven deployments (Docker builds, health-gated
+zero-downtime switching, heartbeats with CPU/memory/disk metrics), mint a
+registration token with the **Agent** button on the server row and follow
+[Agent protocol](agent-protocol.md). The SSH bridge keeps working either way —
+deploys use the agent whenever one is registered for the server.

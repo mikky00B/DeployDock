@@ -149,6 +149,11 @@ compromise or credential hygiene.
   deployment id, kind (`deploy`/`rollback`), target commit, and the app spec
   (repository, branch, path, container port, health path, container base,
   resource limits).
+- **Lease expiry:** a claimed command carries a lease
+  (`AGENT_COMMAND_LEASE_SECONDS`, default 30 minutes, always longer than the
+  deploy timeout). If the agent dies before reporting a result, a periodic
+  control-plane sweep fails the expired command and its deployment, then
+  promotes anything queued behind it — no re-registration or restart needed.
 - `POST /api/v1/agents/{agent_id}/commands/{command_id}/result` — closes the
   command out; the claim token minted at claim time must be echoed back.
 - `POST /api/v1/agents/{agent_id}/events` — batches of
@@ -157,5 +162,10 @@ compromise or credential hygiene.
   `deployment_failed`. The control plane writes these into `deployment_logs`,
   advances the 12-value deployment status, and wakes the SSE stream; terminal
   statuses are never overwritten (a cancel always wins over a racing result).
+  The response reports `{"accepted": N, "rejected": M}` — rejected events
+  (unknown deployment, terminal status) are logged server-side and never block
+  the rest of the batch.
 - Idempotency: one in-flight command per agent; a stale claim token is
-  rejected with 409.
+  rejected with 409. A partial unique index guarantees at most one live
+  (queued/claimed) command per deployment, so duplicate dispatch resolves at
+  the database.
