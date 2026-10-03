@@ -10,7 +10,7 @@ PostgreSQL; the CI migrations job runs it with a real Postgres 16 service.
 import os
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -77,7 +77,9 @@ async def test_two_dispatchable_deployments_per_app_are_rejected(pg_session) -> 
         owner_id=app.owner_id, app_id=app.id, server_id=app.server_id, status=DeploymentStatus.cloning
     )
     pg_session.add(first)
-    await pg_session.flush()
+    # Commit the seed: after the expected violation the test rolls the session
+    # back, and rollback discards everything not yet committed.
+    await pg_session.commit()
 
     # A deployment in a pipeline stage must occupy the guard slot exactly like
     # 'pending'/'running' did — the database, not the service layer, enforces it.
@@ -133,20 +135,28 @@ async def test_two_live_commands_for_one_deployment_are_rejected(pg_session) -> 
     pg_session.add(agent)
     await pg_session.flush()
 
+    # Capture plain ids: rollback() after the expected violation expires the
+    # loaded objects, and touching their attributes afterwards would attempt a
+    # sync lazy load (MissingGreenlet).
+    deployment_id, agent_id = deployment.id, agent.id
+
     pg_session.add(
         DeploymentCommand(
-            agent_id=agent.id,
-            deployment_id=deployment.id,
+            agent_id=agent_id,
+            deployment_id=deployment_id,
             kind="deploy",
             payload={},
             status="queued",
         )
     )
-    await pg_session.flush()
+    # Commit the seed data: the expected violation below triggers a rollback,
+    # which must only discard the failed duplicate — not the agent/deployment
+    # rows the remainder of the test still uses.
+    await pg_session.commit()
 
     duplicate = DeploymentCommand(
-        agent_id=agent.id,
-        deployment_id=deployment.id,
+        agent_id=agent_id,
+        deployment_id=deployment_id,
         kind="deploy",
         payload={},
         status="claimed",
@@ -156,21 +166,21 @@ async def test_two_live_commands_for_one_deployment_are_rejected(pg_session) -> 
         await pg_session.flush()
     await pg_session.rollback()
 
-    # A completed command does not block a fresh dispatch (retry after failure).
-    completed = DeploymentCommand(
-        agent_id=agent.id,
-        deployment_id=deployment.id,
-        kind="deploy",
-        payload={},
-        status="completed",
+    # A completed command does not block a fresh dispatch: once the seeded
+    # command is completed by the agent, a retry can be enqueued. (Completed is
+    # outside the live-status index; the seeded queued row is completed here,
+    # as it would be after the agent reports its result.)
+    await pg_session.execute(
+        update(DeploymentCommand)
+        .where(DeploymentCommand.deployment_id == deployment_id)
+        .values(status="completed")
     )
     requeued = DeploymentCommand(
-        agent_id=agent.id,
-        deployment_id=deployment.id,
+        agent_id=agent_id,
+        deployment_id=deployment_id,
         kind="deploy",
         payload={},
         status="queued",
     )
-    pg_session.add(completed)
     pg_session.add(requeued)
     await pg_session.flush()  # must not raise
