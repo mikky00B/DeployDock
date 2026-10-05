@@ -62,16 +62,23 @@ def _deliver_sync(settings: Settings, email: OutgoingEmail) -> None:
             server.send_message(message)
 
 
-async def send_email(settings: Settings, email: OutgoingEmail) -> None:
-    """Send one email without ever raising. Returns after the SMTP round-trip."""
+async def send_email(settings: Settings, email: OutgoingEmail) -> bool:
+    """Send one email without ever raising. True when delivered.
+
+    Never raises: callers decide what a failed delivery means. Verification
+    codes, for instance, must not consume a previously delivered code when the
+    replacement could not be sent.
+    """
     if not settings.smtp_host:
         logger.debug("Email disabled (SMTP_HOST unset); dropping %r to %s", email.subject, email.to)
-        return
+        return False
     try:
         await asyncio.to_thread(_deliver_sync, settings, email)
         logger.info("Email sent: %r -> %s", email.subject, email.to)
+        return True
     except Exception:
         logger.exception("Email delivery failed: %r -> %s", email.subject, email.to)
+        return False
 
 
 def email_enabled(settings: Settings) -> bool:
@@ -97,9 +104,10 @@ async def issue_verification_code(
     """Create and email a fresh signup code. Returns the plaintext code, or
     None when email is disabled (or sending failed).
 
-    Issuing a new code consumes every previous unconsumed one, so "the newest
-    code" is always the only live code — no timestamp-ordering dependency when
-    two codes land within the same clock tick.
+    Delivery happens before the commit: only when the new code is actually
+    sent are previous unconsumed codes consumed together with it. If delivery
+    fails, the previously delivered code stays valid and nothing is stored —
+    a throttled or down SMTP server can never strand the user.
     """
     code = generate_code()
     await session.execute(
@@ -110,17 +118,21 @@ async def issue_verification_code(
         )
         .values(consumed_at=datetime.now(UTC))
     )
-    session.add(
-        EmailVerificationCode(
-            user_id=user.id,
-            code_hash=_hash_code(code),
-            purpose=CODE_PURPOSE_SIGNUP,
-            expires_at=datetime.now(UTC) + timedelta(seconds=settings.email_code_ttl_seconds),
-        )
+    new_code = EmailVerificationCode(
+        user_id=user.id,
+        code_hash=_hash_code(code),
+        purpose=CODE_PURPOSE_SIGNUP,
+        expires_at=datetime.now(UTC) + timedelta(seconds=settings.email_code_ttl_seconds),
     )
+    session.add(new_code)
+    await session.flush()
+
+    delivered = await send_email(settings, render_verification_email(user, code, settings))
+    if not delivered:
+        await session.rollback()
+        return None
     await session.commit()
-    await send_email(settings, render_verification_email(user, code, settings))
-    return code if email_enabled(settings) else None
+    return code
 
 
 async def consume_verification_code(

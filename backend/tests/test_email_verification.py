@@ -41,6 +41,7 @@ async def email_client(monkeypatch):
 
     async def fake_send(settings, email):
         sent.append(email)
+        return True
 
     monkeypatch.setattr(email_service, "send_email", fake_send)
     with TestClient(app) as client:
