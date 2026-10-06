@@ -164,7 +164,9 @@ export function ServersPage() {
                   </button>
                 </div>
               </article>
-              {agentToken?.serverId === server.id ? <AgentTokenPanel token={agentToken.token} /> : null}
+              {agentToken?.serverId === server.id ? (
+                <AgentTokenPanel token={agentToken.token} serverName={server.name} />
+              ) : null}
             </Fragment>
           ))}
         </div>
@@ -445,7 +447,7 @@ function PublicKeyBlock({ publicKey }: { publicKey: string }) {
   );
 }
 
-function AgentTokenPanel({ token }: { token: string }) {
+function AgentTokenPanel({ token, serverName }: { token: string; serverName: string }) {
   const command = `sudo ./deploydock-agent register --server ${apiClient.baseUrl || window.location.origin} --token ${token}`;
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -478,6 +480,10 @@ function AgentTokenPanel({ token }: { token: string }) {
       <p className="field-helper">
         Adjust --server if this DeployDock URL is not reachable from the server. After registering,{" "}
         <code className="inline-code">sudo ./deploydock-agent run</code> starts heartbeats and agent-driven deploys.
+      </p>
+      <p className="field-helper">
+        Prefer your AI agent? Run <code className="inline-code">deploydock mcp setup</code> on your machine, then say{" "}
+        <i>"deploy to {serverName}"</i> — the agent handles the rest.
       </p>
     </section>
   );

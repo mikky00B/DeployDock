@@ -19,6 +19,9 @@ type API struct {
 	HTTP    *http.Client
 }
 
+// Version is reported by the MCP server handshake; overridden at build time.
+var Version = "dev"
+
 func NewAPI(baseURL, token string) *API {
 	return &API{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}}
 }
@@ -125,10 +128,12 @@ type App struct {
 }
 
 type Server struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Host   string `json:"host"`
-	Status string `json:"status"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Status   string `json:"status"`
 }
 
 type Deployment struct {
