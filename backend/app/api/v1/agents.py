@@ -25,7 +25,7 @@ from app.schemas.agent import (
     AgentRegistrationTokenRead,
     AgentTokenRotateRead,
 )
-from app.services.agent_dispatch import claim_next_command, complete_command
+from app.services.agent_dispatch import claim_next_command, claim_payload_with_env, complete_command
 from app.services.agent_event_ingestion import ingest_events
 from app.services.agent_service import (
     create_registration_token,
@@ -178,11 +178,16 @@ async def next_commands(
     agent_id: uuid.UUID,
     agent: Annotated[Agent, Depends(get_current_agent)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> list[AgentCommandRead]:
     """Claim the agent's oldest queued command, if any.
 
     Returns a one-element list (or empty): a claim is atomic per call, and one
     in-flight command per agent keeps deployments serialized on the host.
+
+    The response payload carries the app's decrypted environment variables —
+    claim time is the only delivery point, so secrets never sit in the stored
+    command payload.
     """
     if agent.id != agent_id:
         raise HTTPException(
@@ -198,7 +203,7 @@ async def next_commands(
             id=command.id,
             deployment_id=command.deployment_id,
             kind=command.kind.value,
-            payload=command.payload,
+            payload=await claim_payload_with_env(session, command=command, settings=settings),
             claim_token=claim_token,
         )
     ]

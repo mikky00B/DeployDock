@@ -1,0 +1,29 @@
+# DeployDock
+
+> Self-hosted deployment control panel for VPS servers — one-click deploys, live log streaming, service control, rollback, and an agent that executes Docker deployments with health-gated, zero-downtime switching. DeployDock is also operable by AI coding agents (Claude Code, Cursor, Codex) through its built-in MCP server.
+
+DeployDock is self-hosted and MIT-licensed: the FastAPI + PostgreSQL control plane runs wherever you like, and a lightweight Go agent on each target VPS executes deployments. Two execution paths share one record: an SSH bridge for servers without an agent, and the agent's staged Docker pipeline (clone, build, start, health check, proxy, cleanup) for servers with one.
+
+## Docs
+
+- [Getting started](https://github.com/mikky00B/DeployDock/blob/main/docs/getting-started.md): local setup, Docker Compose, first login, first deploy
+- [Configuration](https://github.com/mikky00B/DeployDock/blob/main/docs/configuration.md): every environment variable and production guardrails
+- [Server onboarding](https://github.com/mikky00B/DeployDock/blob/main/docs/server-onboarding.md): deploy users, generated SSH keys, host key pinning, sudoers
+- [Deployments](https://github.com/mikky00B/DeployDock/blob/main/docs/deployments.md): deploy commands, concurrency and queueing, cancellation, log streaming, rollback
+- [Agent protocol](https://github.com/mikky00B/DeployDock/blob/main/docs/agent-protocol.md): agent registration, tokens, heartbeats, command queue and event flow
+- [Security model](https://github.com/mikky00B/DeployDock/blob/main/docs/security.md): what DeployDock protects, what it does not, and why
+- [Operations](https://github.com/mikky00B/DeployDock/blob/main/docs/operations.md): production checklist, workers, key rotation, backups
+- [API reference](https://github.com/mikky00B/DeployDock/blob/main/docs/api.md): endpoints, status codes, error shapes
+- [Architecture](https://github.com/mikky00B/DeployDock/blob/main/docs/architecture.md): components, request flow, design decisions
+- [Contributing](https://github.com/mikky00B/DeployDock/blob/main/docs/contributing.md): tests, linting, migrations, CI
+
+## Operating DeployDock with AI agents
+
+Run `deploydock mcp setup` to register the built-in MCP server with Claude Code,
+Cursor, and Codex. Agents can then list servers and apps, deploy, stream logs,
+roll back, and cancel deployments. The CLI is required:
+`go build -o deploydock ./go/cmd/deploydock` from a repository checkout.
+
+## Optional
+
+- [Research notes](https://github.com/mikky00B/DeployDock/blob/main/docs/research-2026-10-instacloud-aeroplane-ai-trends.md): competitive analysis and the 2026 agentic-AI trend line behind the roadmap

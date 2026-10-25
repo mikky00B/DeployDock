@@ -1,21 +1,21 @@
 """Database-level concurrency guards, verified against real PostgreSQL.
 
 The unit suite runs on SQLite (which skips partial-index enforcement gaps it
-cannot express), so the most safety-critical invariant — one dispatchable
-deployment per app — is re-verified here against the production engine.
-Skipped automatically when DATABASE_URL is not PostgreSQL; the CI migrations
-job runs it with a real Postgres 16 service.
+cannot express), so the most safety-critical invariants — one dispatchable
+deployment per app, one live command per deployment — are re-verified here
+against the production engine. Skipped automatically when DATABASE_URL is not
+PostgreSQL; the CI migrations job runs it with a real Postgres 16 service.
 """
 
 import os
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
-from app.models import App, Deployment, Server, User
+from app.models import App, Deployment, DeploymentCommand, Server, User
 from app.models.deployment import DeploymentStatus
 
 pytestmark = pytest.mark.skipif(
@@ -77,7 +77,9 @@ async def test_two_dispatchable_deployments_per_app_are_rejected(pg_session) -> 
         owner_id=app.owner_id, app_id=app.id, server_id=app.server_id, status=DeploymentStatus.cloning
     )
     pg_session.add(first)
-    await pg_session.flush()
+    # Commit the seed: after the expected violation the test rolls the session
+    # back, and rollback discards everything not yet committed.
+    await pg_session.commit()
 
     # A deployment in a pipeline stage must occupy the guard slot exactly like
     # 'pending'/'running' did — the database, not the service layer, enforces it.
@@ -114,3 +116,71 @@ async def test_queued_may_wait_behind_a_dispatchable_deployment(pg_session) -> N
         )
     ).scalars().all()
     assert len(queued_rows) == 2  # queued is exempt from the index by design
+
+
+async def test_two_live_commands_for_one_deployment_are_rejected(pg_session) -> None:
+    app = await _seed_owner_app(pg_session)
+
+    user = (await pg_session.execute(select(User))).scalar_one()
+    deployment = Deployment(
+        owner_id=user.id, app_id=app.id, server_id=app.server_id, status=DeploymentStatus.pending
+    )
+    pg_session.add(deployment)
+    await pg_session.flush()
+
+    # agent_id is NOT NULL — create a real agent first.
+    from app.models import Agent
+
+    agent = Agent(owner_id=user.id, server_id=app.server_id, name="pg-agent", token_hash="a" * 64)
+    pg_session.add(agent)
+    await pg_session.flush()
+
+    # Capture plain ids: rollback() after the expected violation expires the
+    # loaded objects, and touching their attributes afterwards would attempt a
+    # sync lazy load (MissingGreenlet).
+    deployment_id, agent_id = deployment.id, agent.id
+
+    pg_session.add(
+        DeploymentCommand(
+            agent_id=agent_id,
+            deployment_id=deployment_id,
+            kind="deploy",
+            payload={},
+            status="queued",
+        )
+    )
+    # Commit the seed data: the expected violation below triggers a rollback,
+    # which must only discard the failed duplicate — not the agent/deployment
+    # rows the remainder of the test still uses.
+    await pg_session.commit()
+
+    duplicate = DeploymentCommand(
+        agent_id=agent_id,
+        deployment_id=deployment_id,
+        kind="deploy",
+        payload={},
+        status="claimed",
+    )
+    pg_session.add(duplicate)
+    with pytest.raises(IntegrityError):
+        await pg_session.flush()
+    await pg_session.rollback()
+
+    # A completed command does not block a fresh dispatch: once the seeded
+    # command is completed by the agent, a retry can be enqueued. (Completed is
+    # outside the live-status index; the seeded queued row is completed here,
+    # as it would be after the agent reports its result.)
+    await pg_session.execute(
+        update(DeploymentCommand)
+        .where(DeploymentCommand.deployment_id == deployment_id)
+        .values(status="completed")
+    )
+    requeued = DeploymentCommand(
+        agent_id=agent_id,
+        deployment_id=deployment_id,
+        kind="deploy",
+        payload={},
+        status="queued",
+    )
+    pg_session.add(requeued)
+    await pg_session.flush()  # must not raise

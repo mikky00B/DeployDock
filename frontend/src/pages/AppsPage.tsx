@@ -102,13 +102,17 @@ export function AppsPage() {
     }
   }
 
-  async function handleDelete(appId: string) {
+  async function handleDelete(app: DeployableApp) {
     if (!token) return;
+    const confirmed = window.confirm(
+      `Delete app "${app.name}"? Its deployment history goes with it; the server is never modified.`,
+    );
+    if (!confirmed) return;
     setError(null);
     setNotice(null);
     try {
-      await deleteApp(token, appId);
-      setApps((current) => current.filter((app) => app.id !== appId));
+      await deleteApp(token, app.id);
+      setApps((current) => current.filter((a) => a.id !== app.id));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete app");
     }
@@ -141,7 +145,7 @@ export function AppsPage() {
               </div>
               <StatusBadge label={deployableApp.service_name ?? "no service"} />
               <div className="row-actions">
-                <button className="danger-button" type="button" onClick={() => void handleDelete(deployableApp.id)}>
+                <button className="danger-button" type="button" onClick={() => void handleDelete(deployableApp)}>
                   Delete
                 </button>
               </div>

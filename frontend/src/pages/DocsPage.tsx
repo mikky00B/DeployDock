@@ -264,6 +264,27 @@ sudo ./deploydock-agent run
 ./deploydock-agent doctor`}</code>
             </pre>
           </article>
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Operate from your AI agent</h3>
+            </div>
+            <p>
+              DeployDock ships a built-in MCP server. One command registers it with Claude Code, Cursor, and Codex;
+              after that your agent can list apps, deploy, stream logs, and roll back by name.
+            </p>
+            <pre className="command-snippet">
+              <code>{`deploydock mcp setup
+
+# then, from your agent:
+#   "list my DeployDock apps"
+#   "deploy watchdog and follow the logs"
+#   "roll back watchdog to the previous release"`}</code>
+            </pre>
+            <p>
+              The MCP server is the CLI binary itself (<code className="inline-code">deploydock mcp serve</code>) and
+              uses your stored credentials — nothing else to install.
+            </p>
+          </article>
         </div>
       </section>
 

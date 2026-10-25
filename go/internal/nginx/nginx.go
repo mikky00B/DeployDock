@@ -9,7 +9,9 @@ package nginx
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,12 +59,23 @@ func (m *Manager) Configure(ctx context.Context, cfg engine.ProxyConfig) error {
 	}
 	path := filepath.Join(m.confDir(), cfg.AppName+".conf")
 	config := renderConfig(cfg)
-	if err := os.WriteFile(path, []byte(config), 0o644); err != nil { //nolint:gosec // world-readable nginx config is fine
+
+	// Capture the previous config so a failed validation can put it back.
+	previous, hadPrevious, err := readConfig(path)
+	if err != nil {
+		return fmt.Errorf("read previous config %s: %w", path, err)
+	}
+
+	if err := writeFileAtomic(path, []byte(config)); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := m.Validate(ctx); err != nil {
-		// Roll the bad config back so nginx keeps its last good state.
-		_ = os.Remove(path)
+		// Restore the last good config so the file on disk keeps matching what
+		// nginx is serving from memory; otherwise the next unrelated reload
+		// would drop this app's proxying entirely.
+		if restoreErr := restoreConfig(path, previous, hadPrevious); restoreErr != nil {
+			return fmt.Errorf("validation failed (restore previous config: %v): %w", restoreErr, err)
+		}
 		return fmt.Errorf("validation failed (config rolled back): %w", err)
 	}
 	return m.Reload(ctx)
@@ -89,6 +102,51 @@ func (m *Manager) Reload(ctx context.Context) error {
 		return fmt.Errorf("%s: %w: %s", m.reloadCommand(), err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// readConfig returns the current file content and whether it existed.
+func readConfig(path string) ([]byte, bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+// restoreConfig puts back the config captured before an overwrite: the
+// previous content when there was one, nothing at all when the app had no
+// managed config yet.
+func restoreConfig(path string, previous []byte, hadPrevious bool) error {
+	if !hadPrevious {
+		return os.Remove(path)
+	}
+	return writeFileAtomic(path, previous)
+}
+
+// writeFileAtomic writes via a temp file in the same directory plus rename,
+// so a concurrent reload never observes a half-written config.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".deploydock-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeded
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil { //nolint:gosec // world-readable nginx config is fine
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // renderConfig renders one managed server block. Upstreams always bind to the

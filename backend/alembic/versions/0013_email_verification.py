@@ -26,10 +26,14 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column(
         "users",
-        sa.Column("email_verified", sa.Boolean(), nullable=False, server_default="false"),
+        sa.Column("email_verified", sa.Boolean(), nullable=False, server_default="true"),
     )
     op.add_column("users", sa.Column("email_verified_at", sa.DateTime(timezone=True), nullable=True))
     op.create_index("ix_users_email_verified", "users", ["email_verified"])
+
+    # Existing accounts predate the verification feature and must keep working:
+    # only accounts created AFTER this migration prove their address with a code.
+    op.execute("UPDATE users SET email_verified = true")
 
     op.create_table(
         "email_verification_codes",

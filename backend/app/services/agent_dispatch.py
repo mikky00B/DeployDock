@@ -16,6 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.models import (
     Agent,
     AgentCommandKind,
@@ -181,6 +182,34 @@ async def claim_next_command(
         await session.rollback()
 
 
+async def claim_payload_with_env(
+    session: AsyncSession,
+    *,
+    command: DeploymentCommand,
+    settings: Settings,
+) -> dict:
+    """The command payload as delivered to the claiming agent.
+
+    The stored payload never contains secrets: environment variables are
+    decrypted and merged in here at claim time, returned once over the
+    authenticated claim response, and never written back to the database.
+    """
+    from app.services.environment_service import merged_app_variables
+
+    deployment = await session.get(Deployment, command.deployment_id)
+    if deployment is None:
+        return command.payload
+    app = await session.get(App, deployment.app_id)
+    if app is None:
+        return command.payload
+    env = await merged_app_variables(session, app=app, settings=settings)
+    if not env:
+        return command.payload
+    payload = dict(command.payload)
+    payload["app"] = {**payload.get("app", {}), "env": env}
+    return payload
+
+
 async def complete_command(
     session: AsyncSession,
     *,
@@ -284,9 +313,14 @@ async def reclaim_stale_commands(session: AsyncSession, *, lease_seconds: int) -
     for deployment_id in notified_deployments:
         deployment_event_bus.notify(deployment_id)
     for app_id in affected_app_ids:
-        promoted = await promote_next_queued_deployment(session, app_id=app_id)
-        if promoted is not None:
-            await dispatch_deployment(session, deployment=promoted)
+        # One app's promotion failure (e.g. a lost race, a dispatch error)
+        # must not leave the remaining apps stuck behind an unclaimed sweep.
+        try:
+            promoted = await promote_next_queued_deployment(session, app_id=app_id)
+            if promoted is not None:
+                await dispatch_deployment(session, deployment=promoted)
+        except Exception:  # noqa: BLE001 - reclaim must finish every app
+            logger.exception("Promotion after lease reclaim failed for app %s", app_id)
 
     logger.warning("Reclaimed %s expired agent command(s)", len(stale))
     return len(stale)
@@ -342,6 +376,11 @@ async def promote_next_queued_deployment(
     promoted deployment so the caller can dispatch it; the one-active-per-app
     guard is re-checked here because queued rows are exempt from the partial
     unique index.
+
+    The index is the authority: two promoters racing on check-then-update (the
+    deployment just turned terminal from two paths at once) resolve to a single
+    promoted deployment at the database, not in application code. The loser
+    gets an IntegrityError on commit and treats it as "someone else promoted".
     """
     from app.models.deployment import (
         DeploymentStatus,
@@ -369,6 +408,14 @@ async def promote_next_queued_deployment(
         return None
 
     promoted.status = DeploymentStatus.pending
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        logger.info(
+            "Promotion for app %s lost the race; another deployment is already dispatchable",
+            app_id,
+        )
+        return None
     await session.refresh(promoted)
     return promoted

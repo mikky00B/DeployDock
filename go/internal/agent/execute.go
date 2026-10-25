@@ -78,6 +78,7 @@ func executeCommand(ctx context.Context, log *slog.Logger, api *client.Client, s
 			Port:           cmd.Payload.App.Port,
 			HealthcheckURL: cmd.Payload.App.HealthcheckURL,
 			ContainerBase:  cmd.Payload.App.ContainerBase,
+			Env:            cmd.Payload.App.Env,
 			CPULimit:       derefString(cmd.Payload.App.CPULimit),
 			MemoryLimit:    derefString(cmd.Payload.App.MemoryLimit),
 		},

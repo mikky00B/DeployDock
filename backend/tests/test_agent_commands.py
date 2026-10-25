@@ -455,3 +455,88 @@ def test_queued_deployment_is_promoted_when_active_turns_terminal(agent_deployme
     claimed = claim_command(client, registered)
     assert len(claimed) == 1
     assert claimed[0]["payload"]["deployment_id"] == str(queued.id)
+
+
+def test_promotion_that_loses_a_race_returns_none(agent_deployment_client) -> None:
+    """Two promoters racing check-then-update resolve at the partial index:
+    the loser's IntegrityError must surface as None, never as an agent-facing
+    500 or a raised error that aborts the caller's loop."""
+    from unittest.mock import AsyncMock, patch
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.agent_dispatch import promote_next_queued_deployment
+    from app.services.deployment_service import create_deployment
+
+    client = agent_deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    server = create_server(client, headers)
+    app_record = create_app(client, headers, server)
+
+    async def _scenario():
+        async with client.async_session() as session:
+            owner = (await session.execute(select(User))).scalar_one()
+            queued = await create_deployment(
+                session,
+                app_id=uuid.UUID(app_record["id"]),
+                current_user=owner,
+            )
+            queued.status = DeploymentStatus.queued
+            await session.commit()
+
+            # Simulate the race window: the active check passed, but a
+            # concurrent promoter already made another row dispatchable.
+            rigged_commit = AsyncMock(
+                side_effect=IntegrityError("unique violation", None, Exception("dup"))
+            )
+            with patch.object(session, "commit", rigged_commit):
+                result = await promote_next_queued_deployment(
+                    session, app_id=uuid.UUID(app_record["id"])
+                )
+            # The loser reports "nothing promoted" and leaves the session usable.
+            assert result is None
+            await session.rollback()
+
+    client.portal.start_task_soon(_scenario).result(timeout=10)
+
+
+def test_claim_delivers_env_vars_but_never_stores_them(agent_deployment_client) -> None:
+    """Environment variables reach the claiming agent's payload at claim time
+    only: the stored command payload must stay secret-free (spec §36)."""
+    client = agent_deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    server = create_server(client, headers)
+    registered = register_agent_for_server(client, headers, server)
+    app_record = create_app(client, headers, server)
+
+    environment = client.post(
+        f"/api/v1/apps/{app_record['id']}/environments",
+        json={"name": "production", "server_id": server["id"], "auto_deploy": True},
+        headers=headers,
+    ).json()
+    put = client.put(
+        f"/api/v1/environments/{environment['id']}/variables/DATABASE_URL",
+        json={"key": "DATABASE_URL", "value": "postgres://secret-connection-string"},
+        headers=headers,
+    )
+    assert put.status_code == 200
+
+    deploy_response = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers)
+    assert deploy_response.status_code == 202
+
+    commands = claim_command(client, registered)
+    assert len(commands) == 1
+    # Claim-time delivery: the agent sees the decrypted variables.
+    assert commands[0]["payload"]["app"]["env"] == {
+        "DATABASE_URL": "postgres://secret-connection-string"
+    }
+
+    async def _stored_payload():
+        async with client.async_session() as session:
+            row = (await session.execute(select(DeploymentCommand))).scalar_one()
+            return row.payload
+
+    stored = client.portal.start_task_soon(_stored_payload).result(timeout=10)
+    # The persisted payload (what a database dump would expose) has no secrets.
+    assert "env" not in stored["app"]
+    assert "secret-connection-string" not in str(stored)

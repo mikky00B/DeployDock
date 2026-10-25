@@ -168,8 +168,11 @@ func (e *Engine) Execute(ctx context.Context, req Request) error {
 	}
 
 	if err := e.stageCleanup(ctx, s, req); err != nil {
-		// Cleanup failure must not fail an already-live deployment.
-		s.emit(map[string]any{"type": "log", "stream": "system", "line": fmt.Sprintf("cleanup warning: %v", err)})
+		// The new release is already live and serving traffic here; failing the
+		// deployment would tear down the serving container. Report the leftover
+		// state instead: the next deployment clears stale container names in
+		// stageStart (leftover candidate) and stageCleanup (old current).
+		s.emit(map[string]any{"type": "log", "stream": "system", "line": fmt.Sprintf("cleanup warning: %v (new release is live; the next deployment tidies the container names)", err)})
 	}
 
 	emitStageCompleted(s, StageCleanup)
@@ -205,6 +208,11 @@ func (e *Engine) stageStart(ctx context.Context, s sink, req Request, imageRef s
 	emitStage(s, StageStart)
 	if req.App.Port == 0 {
 		return 0, fmt.Errorf("app port is not configured; the agent deploys containerized apps")
+	}
+	// A leftover candidate (e.g. the agent died mid-deploy) would collide with
+	// `docker run --name` below and wedge every later deploy; clear it first.
+	if err := e.Runtime.StopAndRemove(ctx, candidateName(req.App.ContainerBase)); err != nil {
+		return 0, fmt.Errorf("clear stale candidate container: %w", err)
 	}
 	cfg := RunConfig{
 		Name:        candidateName(req.App.ContainerBase),
@@ -263,10 +271,26 @@ func (e *Engine) stageCleanup(ctx context.Context, s sink, req Request) error {
 	if err := e.Runtime.StopAndRemove(ctx, current); err != nil {
 		return fmt.Errorf("stop previous release: %w", err)
 	}
-	if err := e.Runtime.Rename(ctx, candidate, current); err != nil {
+	if err := e.promoteCandidate(ctx, candidate, current); err != nil {
 		return fmt.Errorf("promote candidate: %w", err)
 	}
 	return nil
+}
+
+// promoteCandidate renames the candidate to the current-release name, retrying
+// once: a rename that fails here leaves the live release named "-candidate",
+// which the next deployment must clear before it can start its own candidate.
+func (e *Engine) promoteCandidate(ctx context.Context, candidate, current string) error {
+	err := e.Runtime.Rename(ctx, candidate, current)
+	if err == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("retry after rename failure cancelled: %w", err)
+	case <-time.After(2 * time.Second):
+	}
+	return e.Runtime.Rename(ctx, candidate, current)
 }
 
 func (e *Engine) fail(s sink, req Request, stage string, cause error, started time.Time) error {

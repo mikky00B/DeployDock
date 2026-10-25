@@ -179,6 +179,24 @@ async def decrypted_variables(
     return values
 
 
+async def merged_app_variables(
+    session: AsyncSession,
+    *,
+    app: App,
+    settings: Settings,
+) -> dict[str, str]:
+    """Decrypted variables across all of the app's environments.
+
+    Merged in environment creation order; a key defined in two environments
+    resolves to the later one (deterministic for the receiving agent). The
+    result is for deployment injection only — it must never be persisted.
+    """
+    merged: dict[str, str] = {}
+    for environment in await list_environments(session, app=app):
+        merged.update(await decrypted_variables(session, environment=environment, settings=settings))
+    return merged
+
+
 async def add_domain(
     session: AsyncSession,
     *,

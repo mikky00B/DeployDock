@@ -148,7 +148,10 @@ compromise or credential hygiene.
   command (one at a time; empty list when idle). The payload is self-contained:
   deployment id, kind (`deploy`/`rollback`), target commit, and the app spec
   (repository, branch, path, container port, health path, container base,
-  resource limits).
+  resource limits). The app spec also carries the app's environment variables
+  (`app.env`, decrypted at claim time only): the *stored* command payload never
+  contains secrets — variables are delivered once, in the claim response, and
+  the agent passes them to the container (`docker run -e`).
 - **Lease expiry:** a claimed command carries a lease
   (`AGENT_COMMAND_LEASE_SECONDS`, default 30 minutes, always longer than the
   deploy timeout). If the agent dies before reporting a result, a periodic

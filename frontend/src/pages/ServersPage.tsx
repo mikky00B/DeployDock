@@ -81,13 +81,17 @@ export function ServersPage() {
     }
   }
 
-  async function handleDelete(serverId: string) {
+  async function handleDelete(server: Server) {
     if (!token) return;
+    const confirmed = window.confirm(
+      `Delete server "${server.name}"? Apps registered on it stop being deployable; the server itself is never modified.`,
+    );
+    if (!confirmed) return;
     setError(null);
     setNotice(null);
     try {
-      await deleteServer(token, serverId);
-      setServers((current) => current.filter((server) => server.id !== serverId));
+      await deleteServer(token, server.id);
+      setServers((current) => current.filter((s) => s.id !== server.id));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete server");
     }
@@ -159,12 +163,14 @@ export function ServersPage() {
                   >
                     {testingServerId === server.id ? "Testing" : "Test"}
                   </button>
-                  <button className="danger-button" type="button" onClick={() => void handleDelete(server.id)}>
+                  <button className="danger-button" type="button" onClick={() => void handleDelete(server)}>
                     Delete
                   </button>
                 </div>
               </article>
-              {agentToken?.serverId === server.id ? <AgentTokenPanel token={agentToken.token} /> : null}
+              {agentToken?.serverId === server.id ? (
+                <AgentTokenPanel token={agentToken.token} serverName={server.name} />
+              ) : null}
             </Fragment>
           ))}
         </div>
@@ -445,7 +451,7 @@ function PublicKeyBlock({ publicKey }: { publicKey: string }) {
   );
 }
 
-function AgentTokenPanel({ token }: { token: string }) {
+function AgentTokenPanel({ token, serverName }: { token: string; serverName: string }) {
   const command = `sudo ./deploydock-agent register --server ${apiClient.baseUrl || window.location.origin} --token ${token}`;
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -478,6 +484,10 @@ function AgentTokenPanel({ token }: { token: string }) {
       <p className="field-helper">
         Adjust --server if this DeployDock URL is not reachable from the server. After registering,{" "}
         <code className="inline-code">sudo ./deploydock-agent run</code> starts heartbeats and agent-driven deploys.
+      </p>
+      <p className="field-helper">
+        Prefer your AI agent? Run <code className="inline-code">deploydock mcp setup</code> on your machine, then say{" "}
+        <i>"deploy to {serverName}"</i> — the agent handles the rest.
       </p>
     </section>
   );

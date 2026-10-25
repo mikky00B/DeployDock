@@ -3,19 +3,22 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
 
 // fakeRuntime records calls; injectable failures per operation.
 type fakeRuntime struct {
-	buildErr error
-	runErr   error
-	hostPort int
-	stopped  []string
-	renames  [][2]string
-	built    []string
-	ran      []RunConfig
+	buildErr      error
+	runErr        error
+	hostPort      int
+	renameErrs    []error // consumed front-first; empty = success
+	stopped       []string
+	renames       [][2]string
+	built         []string
+	ran           []RunConfig
+	renameErrFunc func(call int) error
 }
 
 func (f *fakeRuntime) Build(_ context.Context, workspace, imageRef string) error {
@@ -38,6 +41,17 @@ func (f *fakeRuntime) StopAndRemove(_ context.Context, name string) error {
 
 func (f *fakeRuntime) Rename(_ context.Context, oldName, newName string) error {
 	f.renames = append(f.renames, [2]string{oldName, newName})
+	call := len(f.renames) - 1
+	if f.renameErrFunc != nil {
+		if err := f.renameErrFunc(call); err != nil {
+			return err
+		}
+	}
+	if len(f.renameErrs) > 0 {
+		err := f.renameErrs[0]
+		f.renameErrs = f.renameErrs[1:]
+		return err
+	}
 	return nil
 }
 
@@ -95,6 +109,7 @@ func testRequest() Request {
 			Port:           8080,
 			HealthcheckURL: "/health",
 			ContainerBase:  "deploydock-watchdog",
+			Env:            map[string]string{"DATABASE_URL": "postgres://watchdog"},
 		},
 	}
 }
@@ -141,12 +156,19 @@ func TestExecuteHappyPathRunsAllStagesInOrder(t *testing.T) {
 	if len(runtime.built) != 1 || runtime.built[0] != "deploydock-watchdog:a81f92c" {
 		t.Errorf("built = %v, want [deploydock-watchdog:a81f92c]", runtime.built)
 	}
+	// The app's environment variables ride along to the container launch.
+	if len(runtime.ran) != 1 || runtime.ran[0].Env["DATABASE_URL"] != "postgres://watchdog" {
+		t.Errorf("ran env = %v, want DATABASE_URL forwarded", runtime.ran)
+	}
 	// The candidate was promoted to current: stop old, rename candidate.
 	if len(runtime.renames) != 1 || runtime.renames[0] != [2]string{"deploydock-watchdog-candidate", "deploydock-watchdog-current"} {
 		t.Errorf("renames = %v", runtime.renames)
 	}
-	if len(runtime.stopped) != 1 || runtime.stopped[0] != "deploydock-watchdog-current" {
-		t.Errorf("stopped = %v, want [deploydock-watchdog-current]", runtime.stopped)
+	// stageStart clears any stale candidate before running the new one;
+	// cleanup then stops the old current after the health check passed.
+	wantStopped := []string{"deploydock-watchdog-candidate", "deploydock-watchdog-current"}
+	if len(runtime.stopped) != 2 || runtime.stopped[0] != wantStopped[0] || runtime.stopped[1] != wantStopped[1] {
+		t.Errorf("stopped = %v, want %v", runtime.stopped, wantStopped)
 	}
 	// Health check hit the published host port with the app's path.
 	if len(sink.events) > 0 {
@@ -191,8 +213,12 @@ func TestFailedHealthCheckFailsDeploymentAndRemovesCandidate(t *testing.T) {
 		t.Errorf("missing failure events: %v", sink.types())
 	}
 	// Zero-downtime guarantee: the previous release must NOT have been stopped.
-	if len(runtime.stopped) != 1 || runtime.stopped[0] != "deploydock-watchdog-candidate" {
-		t.Errorf("only the candidate may be removed on failure, stopped = %v", runtime.stopped)
+	// (The candidate name appears twice: the stageStart pre-clean and the
+	// failure cleanup both target it; the current release is never touched.)
+	for _, name := range runtime.stopped {
+		if name != "deploydock-watchdog-candidate" {
+			t.Errorf("only the candidate may be removed on failure, stopped = %v", runtime.stopped)
+		}
 	}
 	if len(runtime.renames) != 0 {
 		t.Errorf("candidate must not be promoted on failure, renames = %v", runtime.renames)
@@ -272,5 +298,71 @@ func TestRollbackChecksOutTargetCommit(t *testing.T) {
 	}
 	if gitClient.checkout != "92bc112aaaaaaa" {
 		t.Errorf("checked out %q, want the rollback target", gitClient.checkout)
+	}
+}
+
+func TestPromoteRetriesTransientRenameFailure(t *testing.T) {
+	runtime := &fakeRuntime{
+		hostPort:   40002,
+		renameErrs: []error{fmt.Errorf("docker rename: resource busy")},
+	}
+	sink := &recordingSink{}
+	eng := &Engine{
+		Runtime: runtime,
+		Git:     &fakeGit{commit: "abc"},
+		Health:  &fakeHealth{result: HealthCheckResult{Passed: true, StatusCode: 200, Attempts: 1}},
+		Proxy:   NoopProxy{},
+		Sink:    sink,
+	}
+
+	if err := eng.Execute(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	// The first rename failure was retried and the promotion succeeded.
+	if len(runtime.renames) != 2 {
+		t.Errorf("renames = %v, want a failed attempt plus a retry", runtime.renames)
+	}
+	for _, event := range sink.events {
+		if event["type"] == "deployment_failed" {
+			t.Error("deployment must not fail when the rename retry succeeds")
+		}
+	}
+}
+
+func TestPermanentRenameFailureKeepsLiveDeploymentAndWarns(t *testing.T) {
+	runtime := &fakeRuntime{hostPort: 40003}
+	runtime.renameErrFunc = func(int) error { return fmt.Errorf("docker rename: permission denied") }
+	sink := &recordingSink{}
+	eng := &Engine{
+		Runtime: runtime,
+		Git:     &fakeGit{commit: "abc"},
+		Health:  &fakeHealth{result: HealthCheckResult{Passed: true, StatusCode: 200, Attempts: 1}},
+		Proxy:   NoopProxy{},
+		Sink:    sink,
+	}
+
+	if err := eng.Execute(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Execute must stay live when only the rename fails: %v", err)
+	}
+
+	sawCompletion, sawWarning := false, false
+	for _, event := range sink.events {
+		switch event["type"] {
+		case "deployment_completed":
+			sawCompletion = true
+		case "deployment_failed":
+			t.Error("a live deployment must not be reported as failed")
+		case "log":
+			if line, ok := event["line"].(string); ok && strings.Contains(line, "cleanup warning") {
+				sawWarning = true
+			}
+		}
+	}
+	if !sawCompletion || !sawWarning {
+		t.Errorf("want completion plus cleanup warning, events = %v", sink.types())
+	}
+	// The rename was attempted twice (initial + retry).
+	if len(runtime.renames) != 2 {
+		t.Errorf("renames = %v, want two attempts", runtime.renames)
 	}
 }

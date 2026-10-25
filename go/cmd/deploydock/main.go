@@ -22,9 +22,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/deploydock/deploydock/go/internal/cli"
+	"github.com/deploydock/deploydock/go/internal/mcp"
 )
 
 func main() {
@@ -88,6 +90,8 @@ func main() {
 			name = flags.Arg(0)
 		}
 		err = cli.CmdRollback(ctx, name, *target)
+	case "mcp":
+		err = cmdMCP(ctx, os.Args[2:])
 	case "init":
 		dir := "."
 		if len(os.Args) > 2 {
@@ -146,6 +150,71 @@ func cmdProject(ctx context.Context, args []string) error {
 	}
 }
 
+// cmdMCP handles `deploydock mcp serve|setup` — v3 Theme A: AI agents
+// operate DeployDock through the Model Context Protocol.
+func cmdMCP(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: deploydock mcp serve | mcp setup [--agents ...]")
+	}
+	switch args[0] {
+	case "serve":
+		config, err := cli.LoadConfig()
+		if err != nil {
+			return err
+		}
+		if config.Token == "" {
+			return fmt.Errorf("not signed in: run 'deploydock login' first")
+		}
+		api := cli.NewAPI(config.APIURL, config.Token)
+		server := &mcp.Server{API: api, In: os.Stdin, Out: os.Stdout}
+		return server.Run(ctx)
+	case "setup":
+		flags := flag.NewFlagSet("mcp setup", flag.ExitOnError)
+		agentsFlag := flags.String("agents", "claude,cursor,codex", "comma-separated agents to register")
+		url := flags.String("url", "", "control plane URL (default: stored config)")
+		token := flags.String("token", "", "access token (default: stored config)")
+		home := flags.String("home", "", "home directory override (for testing)")
+		_ = flags.Parse(args[1:])
+
+		config, err := cli.LoadConfig()
+		if err != nil {
+			return err
+		}
+		if *url == "" {
+			*url = config.APIURL
+		}
+		if *token == "" {
+			*token = config.Token
+		}
+		if *url == "" || *token == "" {
+			return fmt.Errorf("control plane URL and token are required: login first or pass --url/--token")
+		}
+		entry, err := cli.BuildMCPEntry(*url, *token)
+		if err != nil {
+			return err
+		}
+		baseDir := *home
+		if baseDir == "" {
+			baseDir, err = os.UserHomeDir()
+			if err != nil {
+				return err
+			}
+		}
+		agentList := strings.Split(*agentsFlag, ",")
+		results, err := cli.SetupAgents(baseDir, agentList, entry)
+		for _, result := range results {
+			fmt.Printf("Registered MCP server with %s.\n", result)
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Println("DeployDock is now operable from your AI agent: \"list my apps\" or \"deploy watchdog\".")
+		return nil
+	default:
+		return fmt.Errorf("unknown mcp command %q (supported: serve, setup)", args[0])
+	}
+}
+
 func usage() {
 	fmt.Print(`deploydock — DeployDock CLI
 
@@ -161,6 +230,7 @@ Usage:
   deploydock status [--json]
   deploydock logs NAME [--deployment ID]
   deploydock rollback NAME [--to ID]
+  deploydock mcp serve | mcp setup [--agents claude,cursor,codex]
   deploydock init
 `)
 }

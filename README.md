@@ -78,7 +78,7 @@ Migrations run automatically before the API starts.
 
 ## Quick start without Docker
 
-Requires Python 3.11+, Node 20+, and a PostgreSQL database. A Go 1.22+ toolchain is needed only to build the CLI and the agent.
+Requires Python 3.11+, Node 20+, and a PostgreSQL database. A Go 1.26+ toolchain is needed only to build the CLI and the agent.
 
 ```bash
 # Backend

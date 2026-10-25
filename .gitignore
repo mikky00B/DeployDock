@@ -25,7 +25,9 @@ Thumbs.db
 
 # Local working docs (not for the repo)
 SPEC_PROGRESS.md
+v3_spec_progress.md
 DeployDock_v2_Master_Spec.md
+DeployDock_v3_Master_Spec.md
 
 # Local design handoff assets
 design_handoff_deploydock_landing/
@@ -33,3 +35,4 @@ design_handoff_deploydock_landing/
 # Local notes and scratch output (not for the repo)
 presentsummery.txt
 deploydock-hardening.patch
+deploydock.exe

@@ -134,7 +134,18 @@ async def login(
 
     if settings.require_email_verification and not user.email_verified:
         # Correct credentials, unconfirmed address: ask for the code. A fresh
-        # code goes out so the user is never stuck without one.
+        # code goes out so the user is never stuck without one. When the
+        # operator turned the gate on without configuring SMTP, say so
+        # instead of issuing codes that can never be delivered.
+        if not email_service.email_enabled(settings):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "Email verification is required but this server has no SMTP "
+                    "host configured. Set REQUIRE_EMAIL_VERIFICATION=false or "
+                    "configure SMTP."
+                ),
+            )
         await email_service.issue_verification_code(session, user=user, settings=settings)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

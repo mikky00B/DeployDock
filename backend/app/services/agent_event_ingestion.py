@@ -72,11 +72,21 @@ async def ingest_events(
     The per-deployment log sequence is read once per deployment per batch and
     then allocated in memory — a several-hundred-line deploy log must not cost
     one max(sequence) query per line.
+
+    Queue promotion (spec §42) runs *after* the batch commit: promoting inside
+    a handler would commit mid-batch, and a promotion that loses a race to a
+    concurrent promoter would roll the whole accepted batch away again.
     """
     accepted = 0
     rejected = 0
     # deployment_id → (deployment, next log sequence)
     batch: dict[uuid.UUID, tuple[Deployment, int]] = {}
+    # app ids whose deployment turned terminal in this batch and whose queued
+    # follower should be promoted once the batch is durable
+    promote_app_ids: set[uuid.UUID] = set()
+
+    def schedule_promote(app_id: uuid.UUID) -> None:
+        promote_app_ids.add(app_id)
 
     for event in events:
         try:
@@ -107,11 +117,17 @@ async def ingest_events(
                 f"unhandled agent event type: {event.get('type')}",
             )
         else:
+            kwargs = (
+                {"schedule_promote": schedule_promote}
+                if event.get("type") in _PROMOTING_EVENT_TYPES
+                else {}
+            )
             await handler(
                 session,
                 deployment=stored_deployment,
                 event=event,
                 allocate=_allocator(stored_deployment, batch),
+                **kwargs,
             )
 
         batch[deployment.id] = (stored_deployment, batch[deployment.id][1])
@@ -120,6 +136,14 @@ async def ingest_events(
     await session.commit()
     for deployment_id in batch:
         deployment_event_bus.notify(deployment_id)
+    for app_id in promote_app_ids:
+        try:
+            promoted = await promote_next_queued_deployment(session, app_id=app_id)
+            if promoted is not None:
+                # Same app, therefore same server and same agent: re-arm the pipeline.
+                await dispatch_deployment(session, deployment=promoted)
+        except Exception:  # noqa: BLE001 - never fail an already-accepted batch
+            logger.exception("Queue promotion after agent events failed for app %s", app_id)
     return accepted, rejected
 
 
@@ -257,6 +281,7 @@ async def _on_completed(
     deployment: Deployment,
     event: dict,
     allocate: Callable[[], int],
+    schedule_promote: Callable[[uuid.UUID], None],
 ) -> None:
     if deployment.status in TERMINAL_DEPLOYMENT_STATUSES:
         return  # cancel already won; do not resurrect
@@ -289,10 +314,7 @@ async def _on_completed(
     )
     _add_log(session, deployment, allocate, DeploymentLogStream.system, "Deployment succeeded")
     await notify_deployment_result(session, deployment_id=deployment.id)
-    promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
-    if promoted is not None:
-        # Same app, therefore same server and same agent: re-arm the pipeline.
-        await dispatch_deployment(session, deployment=promoted)
+    schedule_promote(deployment.app_id)
 
 
 async def _on_failed(
@@ -301,6 +323,7 @@ async def _on_failed(
     deployment: Deployment,
     event: dict,
     allocate: Callable[[], int],
+    schedule_promote: Callable[[uuid.UUID], None],
 ) -> None:
     if deployment.status in TERMINAL_DEPLOYMENT_STATUSES:
         return  # cancel already won; do not resurrect
@@ -327,9 +350,7 @@ async def _on_failed(
     )
     _add_log(session, deployment, allocate, DeploymentLogStream.system, f"Deployment failed: {error}")
     await notify_deployment_result(session, deployment_id=deployment.id)
-    promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
-    if promoted is not None:
-        await dispatch_deployment(session, deployment=promoted)
+    schedule_promote(deployment.app_id)
 
 
 def _add_log(
@@ -395,6 +416,10 @@ _HANDLERS = {
     "deployment_completed": _on_completed,
     "deployment_failed": _on_failed,
 }
+
+# Terminal handlers receive `schedule_promote`; the promotion itself runs
+# after the batch commit (see ingest_events).
+_PROMOTING_EVENT_TYPES = {"deployment_completed", "deployment_failed"}
 
 
 def ensure_deployment_kind(kind: str) -> DeploymentKind:
