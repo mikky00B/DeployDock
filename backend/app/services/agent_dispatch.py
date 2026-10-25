@@ -284,9 +284,14 @@ async def reclaim_stale_commands(session: AsyncSession, *, lease_seconds: int) -
     for deployment_id in notified_deployments:
         deployment_event_bus.notify(deployment_id)
     for app_id in affected_app_ids:
-        promoted = await promote_next_queued_deployment(session, app_id=app_id)
-        if promoted is not None:
-            await dispatch_deployment(session, deployment=promoted)
+        # One app's promotion failure (e.g. a lost race, a dispatch error)
+        # must not leave the remaining apps stuck behind an unclaimed sweep.
+        try:
+            promoted = await promote_next_queued_deployment(session, app_id=app_id)
+            if promoted is not None:
+                await dispatch_deployment(session, deployment=promoted)
+        except Exception:  # noqa: BLE001 - reclaim must finish every app
+            logger.exception("Promotion after lease reclaim failed for app %s", app_id)
 
     logger.warning("Reclaimed %s expired agent command(s)", len(stale))
     return len(stale)
@@ -342,6 +347,11 @@ async def promote_next_queued_deployment(
     promoted deployment so the caller can dispatch it; the one-active-per-app
     guard is re-checked here because queued rows are exempt from the partial
     unique index.
+
+    The index is the authority: two promoters racing on check-then-update (the
+    deployment just turned terminal from two paths at once) resolve to a single
+    promoted deployment at the database, not in application code. The loser
+    gets an IntegrityError on commit and treats it as "someone else promoted".
     """
     from app.models.deployment import (
         DeploymentStatus,
@@ -369,6 +379,14 @@ async def promote_next_queued_deployment(
         return None
 
     promoted.status = DeploymentStatus.pending
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        logger.info(
+            "Promotion for app %s lost the race; another deployment is already dispatchable",
+            app_id,
+        )
+        return None
     await session.refresh(promoted)
     return promoted
