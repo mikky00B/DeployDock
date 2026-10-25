@@ -81,13 +81,17 @@ export function ServersPage() {
     }
   }
 
-  async function handleDelete(serverId: string) {
+  async function handleDelete(server: Server) {
     if (!token) return;
+    const confirmed = window.confirm(
+      `Delete server "${server.name}"? Apps registered on it stop being deployable; the server itself is never modified.`,
+    );
+    if (!confirmed) return;
     setError(null);
     setNotice(null);
     try {
-      await deleteServer(token, serverId);
-      setServers((current) => current.filter((server) => server.id !== serverId));
+      await deleteServer(token, server.id);
+      setServers((current) => current.filter((s) => s.id !== server.id));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete server");
     }
@@ -159,7 +163,7 @@ export function ServersPage() {
                   >
                     {testingServerId === server.id ? "Testing" : "Test"}
                   </button>
-                  <button className="danger-button" type="button" onClick={() => void handleDelete(server.id)}>
+                  <button className="danger-button" type="button" onClick={() => void handleDelete(server)}>
                     Delete
                   </button>
                 </div>
