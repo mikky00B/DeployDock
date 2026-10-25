@@ -109,6 +109,7 @@ func testRequest() Request {
 			Port:           8080,
 			HealthcheckURL: "/health",
 			ContainerBase:  "deploydock-watchdog",
+			Env:            map[string]string{"DATABASE_URL": "postgres://watchdog"},
 		},
 	}
 }
@@ -154,6 +155,10 @@ func TestExecuteHappyPathRunsAllStagesInOrder(t *testing.T) {
 	// Build used the image ref tagged with the short commit.
 	if len(runtime.built) != 1 || runtime.built[0] != "deploydock-watchdog:a81f92c" {
 		t.Errorf("built = %v, want [deploydock-watchdog:a81f92c]", runtime.built)
+	}
+	// The app's environment variables ride along to the container launch.
+	if len(runtime.ran) != 1 || runtime.ran[0].Env["DATABASE_URL"] != "postgres://watchdog" {
+		t.Errorf("ran env = %v, want DATABASE_URL forwarded", runtime.ran)
 	}
 	// The candidate was promoted to current: stop old, rename candidate.
 	if len(runtime.renames) != 1 || runtime.renames[0] != [2]string{"deploydock-watchdog-candidate", "deploydock-watchdog-current"} {

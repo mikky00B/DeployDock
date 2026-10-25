@@ -415,3 +415,39 @@ def test_deploy_is_allowed_again_after_the_previous_one_finishes(deployment_clie
 
     assert first.status_code == 202
     assert second.status_code == 202
+
+
+def test_build_deploy_command_exports_env_inside_the_deploy_shell() -> None:
+    import shlex
+
+    from app.workers.deployment_runner import build_deploy_command
+
+    command = build_deploy_command(
+        "/opt/my app",
+        "make deploy",
+        env={
+            "DATABASE_URL": "postgres://user:p@host/db name",
+            "API_TOKEN": "abc;rm -rf /",
+        },
+    )
+
+    outer = shlex.split(command)
+    assert outer[:2] == ["bash", "-lc"]
+    lines = outer[2].splitlines()
+    assert lines[0] == "set -e"
+    assert lines[1] == "cd '/opt/my app'"
+    # Values with spaces and shell metacharacters arrive intact and quoted.
+    assert lines[2] == "export DATABASE_URL='postgres://user:p@host/db name'"
+    assert lines[3] == "export API_TOKEN='abc;rm -rf /'"
+    # The user's command is the final line, verbatim.
+    assert lines[-1] == "make deploy"
+
+
+def test_build_deploy_command_without_env_unchanged() -> None:
+    import shlex
+
+    from app.workers.deployment_runner import build_deploy_command
+
+    outer = shlex.split(build_deploy_command("/opt/app", "make build"))
+    lines = outer[2].splitlines()
+    assert lines == ["set -e", "cd /opt/app", "make build"]

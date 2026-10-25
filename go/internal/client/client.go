@@ -68,15 +68,16 @@ type DeployPayload struct {
 
 // AppSpec describes the application to deploy.
 type AppSpec struct {
-	Name           string  `json:"name"`
-	RepositoryURL  string  `json:"repository_url"`
-	Branch         string  `json:"branch"`
-	AppPath        string  `json:"app_path"`
-	Port           int     `json:"port"`
-	HealthcheckURL string  `json:"healthcheck_url"`
-	ContainerBase  string  `json:"container_base"`
-	CPULimit       *string `json:"cpu_limit,omitempty"`
-	MemoryLimit    *string `json:"memory_limit,omitempty"`
+	Name           string            `json:"name"`
+	RepositoryURL  string            `json:"repository_url"`
+	Branch         string            `json:"branch"`
+	AppPath        string            `json:"app_path"`
+	Port           int               `json:"port"`
+	HealthcheckURL string            `json:"healthcheck_url"`
+	ContainerBase  string            `json:"container_base"`
+	Env            map[string]string `json:"env,omitempty"`
+	CPULimit       *string           `json:"cpu_limit,omitempty"`
+	MemoryLimit    *string           `json:"memory_limit,omitempty"`
 }
 
 // CommandResult closes out a claimed command.

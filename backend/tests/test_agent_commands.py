@@ -498,3 +498,45 @@ def test_promotion_that_loses_a_race_returns_none(agent_deployment_client) -> No
             await session.rollback()
 
     client.portal.start_task_soon(_scenario).result(timeout=10)
+
+
+def test_claim_delivers_env_vars_but_never_stores_them(agent_deployment_client) -> None:
+    """Environment variables reach the claiming agent's payload at claim time
+    only: the stored command payload must stay secret-free (spec §36)."""
+    client = agent_deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    server = create_server(client, headers)
+    registered = register_agent_for_server(client, headers, server)
+    app_record = create_app(client, headers, server)
+
+    environment = client.post(
+        f"/api/v1/apps/{app_record['id']}/environments",
+        json={"name": "production", "server_id": server["id"], "auto_deploy": True},
+        headers=headers,
+    ).json()
+    put = client.put(
+        f"/api/v1/environments/{environment['id']}/variables/DATABASE_URL",
+        json={"key": "DATABASE_URL", "value": "postgres://secret-connection-string"},
+        headers=headers,
+    )
+    assert put.status_code == 200
+
+    deploy_response = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers)
+    assert deploy_response.status_code == 202
+
+    commands = claim_command(client, registered)
+    assert len(commands) == 1
+    # Claim-time delivery: the agent sees the decrypted variables.
+    assert commands[0]["payload"]["app"]["env"] == {
+        "DATABASE_URL": "postgres://secret-connection-string"
+    }
+
+    async def _stored_payload():
+        async with client.async_session() as session:
+            row = (await session.execute(select(DeploymentCommand))).scalar_one()
+            return row.payload
+
+    stored = client.portal.start_task_soon(_stored_payload).result(timeout=10)
+    # The persisted payload (what a database dump would expose) has no secrets.
+    assert "env" not in stored["app"]
+    assert "secret-connection-string" not in str(stored)

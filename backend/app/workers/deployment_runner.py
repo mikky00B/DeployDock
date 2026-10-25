@@ -18,6 +18,7 @@ from app.models.deployment_log import DeploymentLogStream
 from app.services.audit_service import create_audit_log
 from app.services.deployment_events import deployment_event_bus
 from app.services.email_service import notify_deployment_result
+from app.services.environment_service import merged_app_variables
 from app.services.ssh_service import SSHCommandResult, SSHService
 
 
@@ -87,7 +88,11 @@ class DeploymentRunner:
                     port=server.port,
                     username=server.username,
                     private_key=private_key,
-                    command=build_deploy_command(app.app_path, app.deploy_command),
+                    command=build_deploy_command(
+                        app.app_path,
+                        app.deploy_command,
+                        env=await merged_app_variables(session, app=app, settings=self.settings),
+                    ),
                     known_host_key=server.known_host_key,
                     timeout_seconds=self.settings.deploy_timeout_seconds,
                 )
@@ -420,8 +425,19 @@ def build_git_commit_command(app_path: str) -> str:
     return f"cd {shlex.quote(app_path)} && git rev-parse HEAD"
 
 
-def build_deploy_command(app_path: str, deploy_command: str) -> str:
-    script = f"set -e\ncd {shlex.quote(app_path)}\n{deploy_command}"
+def build_deploy_command(app_path: str, deploy_command: str, env: dict[str, str] | None = None) -> str:
+    """Wrap the user's deploy command with quoting and environment variables.
+
+    Variables are exported inside the deploy shell only; they reach commands
+    run in that shell (e.g. `pip install`, app servers started in-place), not
+    systemd services restarted by the command — the agent path delivers them
+    to the container instead.
+    """
+    script_lines = ["set -e", f"cd {shlex.quote(app_path)}"]
+    for key, value in (env or {}).items():
+        script_lines.append(f"export {shlex.quote(key)}={shlex.quote(value)}")
+    script_lines.append(deploy_command)
+    script = "\n".join(script_lines)
     return "bash -lc " + shlex.quote(script)
 
 

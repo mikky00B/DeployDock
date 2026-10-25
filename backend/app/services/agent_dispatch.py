@@ -16,6 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.models import (
     Agent,
     AgentCommandKind,
@@ -179,6 +180,34 @@ async def claim_next_command(
             return command, claim_token
         # Another poller won the race; loop to try the next queued row.
         await session.rollback()
+
+
+async def claim_payload_with_env(
+    session: AsyncSession,
+    *,
+    command: DeploymentCommand,
+    settings: Settings,
+) -> dict:
+    """The command payload as delivered to the claiming agent.
+
+    The stored payload never contains secrets: environment variables are
+    decrypted and merged in here at claim time, returned once over the
+    authenticated claim response, and never written back to the database.
+    """
+    from app.services.environment_service import merged_app_variables
+
+    deployment = await session.get(Deployment, command.deployment_id)
+    if deployment is None:
+        return command.payload
+    app = await session.get(App, deployment.app_id)
+    if app is None:
+        return command.payload
+    env = await merged_app_variables(session, app=app, settings=settings)
+    if not env:
+        return command.payload
+    payload = dict(command.payload)
+    payload["app"] = {**payload.get("app", {}), "env": env}
+    return payload
 
 
 async def complete_command(
