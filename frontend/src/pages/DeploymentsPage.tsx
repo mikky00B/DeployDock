@@ -176,6 +176,7 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
         </div>
         {notice ? <p className="success-message">{notice}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}
+        {stream.reconnecting ? <p className="metadata-note">Stream connection dropped — reconnecting…</p> : null}
         {stream.error ? <p className="form-error">{stream.error}</p> : null}
         {isRunning ? (
           <div className="row-actions">
