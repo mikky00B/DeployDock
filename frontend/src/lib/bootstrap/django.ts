@@ -1,5 +1,6 @@
 import type { AppPayload } from "../../types/app";
 import type { Server } from "../../types/server";
+import { shellQuote } from "./common";
 
 export type BootstrapDjangoForm = {
   server_id: string;
@@ -105,7 +106,7 @@ export function generateDjangoBootstrapPlan(rawForm: BootstrapDjangoForm, server
   const host = parseHostInput(form.domain_or_ip, server?.host);
   const healthcheckUrl = buildHealthcheckUrl(host.origin, form.healthcheck_path);
   const venvBin = resolveVenvBin(form.app_path, form.virtualenv_path);
-  const activateCommand = `source ${resolveVenvActivate(form.virtualenv_path)}`;
+  const activateCommand = `source ${shellQuote(resolveVenvActivate(form.virtualenv_path))}`;
   const restartCommand = `sudo systemctl restart ${serviceName}`;
   const deployCommand = generateDeployCommand(form, serviceName, celeryServiceName);
 
@@ -116,14 +117,14 @@ export function generateDjangoBootstrapPlan(rawForm: BootstrapDjangoForm, server
       language: "bash",
       helper: "Review these commands before running them. They are not executed by DeployDock.",
       content: [
-        `sudo mkdir -p ${form.app_path}`,
-        `sudo chown -R ${deployUser}:${deployUser} ${form.app_path}`,
-        `cd ${form.app_path}`,
-        `git clone ${form.repository_url || "<repo_url>"} .`,
-        `git checkout ${form.branch}`,
-        `${form.python_version_label} -m venv ${form.virtualenv_path}`,
+        `sudo mkdir -p ${shellQuote(form.app_path)}`,
+        `sudo chown -R ${deployUser}:${deployUser} ${shellQuote(form.app_path)}`,
+        `cd ${shellQuote(form.app_path)}`,
+        `git clone ${shellQuote(form.repository_url || "<repo_url>")} .`,
+        `git checkout ${shellQuote(form.branch)}`,
+        `${form.python_version_label} -m venv ${shellQuote(form.virtualenv_path)}`,
         activateCommand,
-        `pip install -r ${form.requirements_file}`,
+        `pip install -r ${shellQuote(form.requirements_file)}`,
         "pip install gunicorn",
       ].join("\n"),
     },
@@ -158,13 +159,13 @@ export function generateDjangoBootstrapPlan(rawForm: BootstrapDjangoForm, server
       content: [
         "sudo -u postgres psql",
         "",
-        `CREATE DATABASE ${dbName};`,
-        `CREATE USER ${dbUser} WITH PASSWORD '<change-me>';`,
-        `GRANT ALL PRIVILEGES ON DATABASE ${dbName} TO ${dbUser};`,
+        `CREATE DATABASE "${dbName}";`,
+        `CREATE USER "${dbUser}" WITH PASSWORD '<change-me>';`,
+        `GRANT ALL PRIVILEGES ON DATABASE "${dbName}" TO "${dbUser}";`,
         "",
-        `\\c ${dbName}`,
-        `GRANT ALL ON SCHEMA public TO ${dbUser};`,
-        `ALTER SCHEMA public OWNER TO ${dbUser};`,
+        `\\c "${dbName}"`,
+        `GRANT ALL ON SCHEMA public TO "${dbUser}";`,
+        `ALTER SCHEMA public OWNER TO "${dbUser}";`,
       ].join("\n"),
     });
   }
@@ -175,7 +176,7 @@ export function generateDjangoBootstrapPlan(rawForm: BootstrapDjangoForm, server
       title: "Django Initialization Commands",
       language: "bash",
       content: [
-        `cd ${form.app_path}`,
+        `cd ${shellQuote(form.app_path)}`,
         activateCommand,
         "python manage.py migrate",
         "python manage.py collectstatic --noinput",
@@ -410,15 +411,15 @@ function generateDeployCommand(form: BootstrapDjangoForm, serviceName: string, c
   return [
     "set -e",
     "",
-    `cd ${form.app_path}`,
+    `cd ${shellQuote(form.app_path)}`,
     "",
     "git fetch origin",
-    `git checkout ${form.branch}`,
-    `git pull origin ${form.branch}`,
+    `git checkout ${shellQuote(form.branch)}`,
+    `git pull origin ${shellQuote(form.branch)}`,
     "",
-    `source ${resolveVenvActivate(form.virtualenv_path)}`,
+    `source ${shellQuote(resolveVenvActivate(form.virtualenv_path))}`,
     "",
-    `pip install -r ${form.requirements_file}`,
+    `pip install -r ${shellQuote(form.requirements_file)}`,
     "",
     "python manage.py migrate",
     ...(form.post_migrate_command.trim() ? [`python manage.py ${form.post_migrate_command.trim()} || true`] : []),

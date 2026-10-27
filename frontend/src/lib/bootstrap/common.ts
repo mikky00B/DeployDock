@@ -52,6 +52,15 @@ export function slugify(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/**
+ * Single-quote a user-supplied value for safe interpolation into the generated
+ * bash commands (paths, repo URLs, branch names). Prevents shell metacharacters
+ * in form input from injecting extra commands into the plan.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 export function normalizePath(value: string, fallback: string): string {
   const trimmed = value.trim() || fallback;
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;

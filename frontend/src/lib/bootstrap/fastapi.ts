@@ -9,6 +9,7 @@ import {
   sudoersWarning,
   systemdSudoersSnippet,
   withSharedDefaults,
+  shellQuote,
   type BootstrapPlan,
   type BootstrapPlanSection,
   type SharedBootstrapFields,
@@ -79,7 +80,7 @@ export function generateFastApiBootstrapPlan(rawForm: BootstrapFastApiForm, serv
   const serviceName = stripServiceSuffix(form.systemd_service_name);
   const healthcheckUrl = buildHealthcheckUrl(host.origin, form.healthcheck_path);
   const venvBin = resolveVenvBin(form.app_path, form.virtualenv_path);
-  const activateCommand = `source ${resolveVenvActivate(form.virtualenv_path)}`;
+  const activateCommand = `source ${shellQuote(resolveVenvActivate(form.virtualenv_path))}`;
   const restartCommand = `sudo systemctl restart ${serviceName}`;
   const deployCommand = generateFastApiDeployCommand(form, serviceName);
   const execStart = form.start_command_mode === "uvicorn"
@@ -93,14 +94,14 @@ export function generateFastApiBootstrapPlan(rawForm: BootstrapFastApiForm, serv
       language: "bash",
       helper: "Review these commands before running them. They are not executed by DeployDock.",
       content: [
-        `sudo mkdir -p ${form.app_path}`,
-        `sudo chown -R ${deployUser}:${deployUser} ${form.app_path}`,
-        `cd ${form.app_path}`,
-        `git clone ${form.repository_url || "<repo_url>"} .`,
-        `git checkout ${form.branch}`,
-        `${form.python_version_label} -m venv ${form.virtualenv_path}`,
+        `sudo mkdir -p ${shellQuote(form.app_path)}`,
+        `sudo chown -R ${deployUser}:${deployUser} ${shellQuote(form.app_path)}`,
+        `cd ${shellQuote(form.app_path)}`,
+        `git clone ${shellQuote(form.repository_url || "<repo_url>")} .`,
+        `git checkout ${shellQuote(form.branch)}`,
+        `${form.python_version_label} -m venv ${shellQuote(form.virtualenv_path)}`,
         activateCommand,
-        `pip install -r ${form.requirements_file}`,
+        `pip install -r ${shellQuote(form.requirements_file)}`,
         "pip install gunicorn uvicorn",
       ].join("\n"),
     },
@@ -201,15 +202,15 @@ function generateFastApiDeployCommand(form: BootstrapFastApiForm, serviceName: s
   return [
     "set -e",
     "",
-    `cd ${form.app_path}`,
+    `cd ${shellQuote(form.app_path)}`,
     "",
     "git fetch origin",
-    `git checkout ${form.branch}`,
-    `git pull origin ${form.branch}`,
+    `git checkout ${shellQuote(form.branch)}`,
+    `git pull origin ${shellQuote(form.branch)}`,
     "",
-    `source ${resolveVenvActivate(form.virtualenv_path)}`,
+    `source ${shellQuote(resolveVenvActivate(form.virtualenv_path))}`,
     "",
-    `pip install -r ${form.requirements_file}`,
+    `pip install -r ${shellQuote(form.requirements_file)}`,
     "",
     ...(form.migration_command.trim() ? [form.migration_command.trim(), ""] : ["# Optional migrations if the app uses Alembic", "# alembic upgrade head", ""]),
     `sudo systemctl restart ${serviceName}`,
