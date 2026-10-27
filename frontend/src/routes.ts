@@ -17,6 +17,15 @@ export type RouteState = {
 
 const routes: AppRoute[] = ["/", "/login", "/register", "/dashboard", "/servers", "/apps", "/deployments", "/docs"];
 
+export function isKnownPathname(pathname: string): boolean {
+  return (
+    routes.includes(pathname as AppRoute) ||
+    /^\/servers\/[^/]+$/.test(pathname) ||
+    /^\/apps\/[^/]+$/.test(pathname) ||
+    /^\/deployments\/[^/]+$/.test(pathname)
+  );
+}
+
 export function getCurrentRoute(): RouteState {
   const pathname = window.location.pathname;
   const serverMatch = pathname.match(/^\/servers\/([^/]+)$/);
@@ -40,7 +49,13 @@ export function getCurrentRoute(): RouteState {
   return { route: "/dashboard" };
 }
 
-export function navigateTo(path: AppRoute | `/servers/${string}` | `/apps/${string}` | `/deployments/${string}`) {
+export type NavigateTarget =
+  | AppRoute
+  | `/servers/${string}`
+  | `/apps/${string}`
+  | `/deployments/${string}`;
+
+export function navigateTo(path: NavigateTarget) {
   window.history.pushState({}, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
