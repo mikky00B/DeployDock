@@ -12,7 +12,7 @@ import {
   testServerConnection,
   updateServer,
 } from "../api/servers";
-import { EmptyState, formatDateTime, StatusBadge } from "../components/common";
+import { EmptyState, copyToClipboard, formatDateTime, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 import { navigateTo } from "../routes";
 import type { Server, ServerStatus } from "../types/server";
@@ -20,7 +20,7 @@ import type { Server, ServerStatus } from "../types/server";
 const emptyServerForm = {
   name: "",
   host: "",
-  port: 22,
+  port: "22",
   username: "",
   private_key: "",
 };
@@ -36,24 +36,35 @@ export function ServersPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [testingServerId, setTestingServerId] = useState<string | null>(null);
+  const [mintingServerId, setMintingServerId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [agentToken, setAgentToken] = useState<{ serverId: string; token: string } | null>(null);
 
   async function handleMintAgentToken(serverId: string) {
     if (!token) return;
     setError(null);
     setNotice(null);
+    setMintingServerId(serverId);
     try {
       const minted = await createAgentRegistrationToken(token, serverId);
       setAgentToken({ serverId, token: minted.token });
     } catch (tokenError) {
       setError(tokenError instanceof Error ? tokenError.message : "Could not mint an agent registration token");
+    } finally {
+      setMintingServerId(null);
     }
   }
 
   useEffect(() => {
     if (!token) return;
-    void loadServers(token, setServers, setError, setIsLoading);
-  }, [token]);
+    let cancelled = false;
+    setIsLoading(true);
+    void loadServers(token, setServers, setError, setIsLoading, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [token, reloadKey]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -89,11 +100,14 @@ export function ServersPage() {
     if (!confirmed) return;
     setError(null);
     setNotice(null);
+    setDeletingId(server.id);
     try {
       await deleteServer(token, server.id);
       setServers((current) => current.filter((s) => s.id !== server.id));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete server");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -127,10 +141,22 @@ export function ServersPage() {
             <h2 id="servers-title">Servers</h2>
           </div>
         </div>
-        {notice ? <p className="success-message">{notice}</p> : null}
-        {error ? <p className="form-error">{error}</p> : null}
+        {notice ? <p className="success-message" role="status">{notice}</p> : null}
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
         {isLoading ? <p className="muted">Loading servers...</p> : null}
-        {!isLoading && servers.length === 0 ? (
+        {error && !isLoading && servers.length === 0 ? (
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => {
+              setError(null);
+              setReloadKey((key) => key + 1);
+            }}
+          >
+            Retry
+          </button>
+        ) : null}
+        {!isLoading && servers.length === 0 && !error ? (
           <EmptyState title="No servers yet" body="Connect your first VPS to start deploying existing server apps." />
         ) : null}
         <div className="resource-list">
@@ -138,22 +164,30 @@ export function ServersPage() {
             <Fragment key={server.id}>
               <article className="resource-row">
                 <div>
-                  <button className="link-button title-link" type="button" onClick={() => navigateTo(`/servers/${server.id}`)}>
+                  <a
+                    className="link-button title-link"
+                    href={`/servers/${server.id}`}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      navigateTo(`/servers/${server.id}`);
+                    }}
+                  >
                     {server.name}
-                  </button>
+                  </a>
                   <p>{server.username}@{server.host}:{server.port}</p>
                   {server.known_host_key_fingerprint ? null : (
-                    <p className="field-helper">Host key not pinned - test the connection to pin it.</p>
+                    <p className="field-helper">Host key not pinned — test the connection to pin it.</p>
                   )}
                 </div>
                 <StatusBadge label={server.status} tone={serverStatusTone(server.status)} />
                 <div className="row-actions">
                   <button
                     className="secondary-button"
+                    disabled={mintingServerId === server.id}
                     type="button"
                     onClick={() => void handleMintAgentToken(server.id)}
                   >
-                    Agent
+                    {mintingServerId === server.id ? "Minting" : "Agent"}
                   </button>
                   <button
                     className="secondary-button"
@@ -163,8 +197,13 @@ export function ServersPage() {
                   >
                     {testingServerId === server.id ? "Testing" : "Test"}
                   </button>
-                  <button className="danger-button" type="button" onClick={() => void handleDelete(server)}>
-                    Delete
+                  <button
+                    className="danger-button"
+                    disabled={deletingId === server.id}
+                    type="button"
+                    onClick={() => void handleDelete(server)}
+                  >
+                    {deletingId === server.id ? "Deleting" : "Delete"}
                   </button>
                 </div>
               </article>
@@ -208,25 +247,35 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
   const [isTesting, setIsTesting] = useState(false);
   const [isRepinning, setIsRepinning] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!token) return;
+    let cancelled = false;
     setIsLoading(true);
     getServer(token, serverId)
       .then((loadedServer) => {
+        if (cancelled) return;
         setServer(loadedServer);
         setForm({
           name: loadedServer.name,
           host: loadedServer.host,
-          port: loadedServer.port,
+          port: String(loadedServer.port),
           username: loadedServer.username,
           private_key: "",
         });
         setError(null);
       })
-      .catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Could not load server"))
-      .finally(() => setIsLoading(false));
-  }, [serverId, token]);
+      .catch((loadError: unknown) => {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Could not load server");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [serverId, token, reloadKey]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -258,7 +307,7 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
       setServer(refreshed);
       if (result.success && wasUnpinned && result.host_key_fingerprint) {
         setNotice(
-          `${result.message}. Host key pinned: ${result.host_key_fingerprint} - verify this against the server itself.`,
+          `${result.message}. Host key pinned: ${result.host_key_fingerprint} — verify this against the server itself.`,
         );
       } else if (result.success) {
         setNotice(result.message);
@@ -298,15 +347,37 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
   }
 
   if (!server) {
-    return <p className="form-error">{error ?? "Server not found"}</p>;
+    return (
+      <section className="detail-layout">
+        <section className="detail-panel">
+          <a className="link-button" href="/servers" onClick={(event) => { event.preventDefault(); navigateTo("/servers"); }}>
+            Back to servers
+          </a>
+          <p className="form-error" role="alert">{error ?? "Server not found"}</p>
+          {error ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => {
+                setError(null);
+                setIsLoading(true);
+                setReloadKey((key) => key + 1);
+              }}
+            >
+              Retry
+            </button>
+          ) : null}
+        </section>
+      </section>
+    );
   }
 
   return (
     <section className="detail-layout">
       <section className="detail-panel">
-        <button className="link-button" type="button" onClick={() => navigateTo("/servers")}>
+        <a className="link-button" href="/servers" onClick={(event) => { event.preventDefault(); navigateTo("/servers"); }}>
           Back to servers
-        </button>
+        </a>
         <div className="detail-header">
           <div>
             <p className="eyebrow">Server</p>
@@ -336,11 +407,11 @@ export function ServerDetailPage({ serverId }: { serverId: string }) {
               )}
             </dd>
           </div>
-          <div><dt>Last checked</dt><dd>{formatDateTime(server.last_connection_check_at) === "Not available" ? "Never" : formatDateTime(server.last_connection_check_at)}</dd></div>
+          <div><dt>Last checked</dt><dd>{server.last_connection_check_at ? formatDateTime(server.last_connection_check_at) : "Never"}</dd></div>
           <div><dt>Last error</dt><dd>{server.last_connection_error ?? "None"}</dd></div>
         </dl>
-        {notice ? <p className="success-message">{notice}</p> : null}
-        {error ? <p className="form-error">{error}</p> : null}
+        {notice ? <p className="success-message" role="status">{notice}</p> : null}
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
         <div className="row-actions">
           <button className="secondary-button" disabled={isTesting} type="button" onClick={() => void handleTest()}>
             {isTesting ? "Testing connection" : "Test connection"}
@@ -395,7 +466,7 @@ function ServerForm({
     <form className="resource-form" onSubmit={onSubmit}>
       <label>Name<input required placeholder="Production VPS" value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} /></label>
       <label>Host<input required placeholder="203.0.113.10 or deploy.example.com" value={form.host} onChange={(event) => onChange({ ...form, host: event.target.value })} /></label>
-      <label>Port<input min={1} max={65535} required type="number" value={form.port} onChange={(event) => onChange({ ...form, port: Number(event.target.value) })} /></label>
+      <label>Port<input min={1} max={65535} required type="number" value={form.port} onChange={(event) => onChange({ ...form, port: event.target.value })} /></label>
       <label>
         Deploy username
         <input required value={form.username} onChange={(event) => onChange({ ...form, username: event.target.value })} />
@@ -441,11 +512,19 @@ chmod 600 ${authorizedKeysPath}`}</code>
 }
 
 function PublicKeyBlock({ publicKey }: { publicKey: string }) {
+  const [copyState, setCopyState] = useState<"copied" | "failed" | null>(null);
+
+  async function handleCopy() {
+    const copied = await copyToClipboard(publicKey);
+    setCopyState(copied ? "copied" : "failed");
+    window.setTimeout(() => setCopyState(null), 1500);
+  }
+
   return (
     <div className="public-key-block">
       <code>{publicKey}</code>
-      <button className="secondary-button" type="button" onClick={() => void navigator.clipboard?.writeText(publicKey)}>
-        Copy
+      <button className="secondary-button" type="button" onClick={() => void handleCopy()}>
+        {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy"}
       </button>
     </div>
   );
@@ -456,8 +535,8 @@ function AgentTokenPanel({ token, serverName }: { token: string; serverName: str
   const [copied, setCopied] = useState<string | null>(null);
 
   async function copy(value: string, label: string) {
-    await navigator.clipboard?.writeText(value);
-    setCopied(label);
+    const succeeded = await copyToClipboard(value);
+    setCopied(succeeded ? label : `${label}-failed`);
     window.setTimeout(() => setCopied(null), 1500);
   }
 
@@ -472,14 +551,14 @@ function AgentTokenPanel({ token, serverName }: { token: string; serverName: str
       <div className="public-key-block">
         <code>{token}</code>
         <button className="secondary-button" type="button" onClick={() => void copy(token, "token")}>
-          {copied === "token" ? "Copied" : "Copy token"}
+          {copied === "token" ? "Copied" : copied === "token-failed" ? "Copy failed" : "Copy token"}
         </button>
       </div>
       <pre className="command-snippet">
         <code>{command}</code>
       </pre>
       <button className="secondary-button" type="button" onClick={() => void copy(command, "command")}>
-        {copied === "command" ? "Copied" : "Copy command"}
+        {copied === "command" ? "Copied" : copied === "command-failed" ? "Copy failed" : "Copy command"}
       </button>
       <p className="field-helper">
         Adjust --server if this DeployDock URL is not reachable from the server. After registering,{" "}
@@ -498,14 +577,18 @@ async function loadServers(
   setServers: (servers: Server[]) => void,
   setError: (error: string | null) => void,
   setIsLoading: (isLoading: boolean) => void,
+  isCancelled: () => boolean = () => false,
 ) {
   try {
-    setServers(await listServers(token));
+    const loaded = await listServers(token);
+    if (isCancelled()) return;
+    setServers(loaded);
     setError(null);
   } catch (loadError) {
+    if (isCancelled()) return;
     setError(loadError instanceof Error ? loadError.message : "Could not load servers");
   } finally {
-    setIsLoading(false);
+    if (!isCancelled()) setIsLoading(false);
   }
 }
 

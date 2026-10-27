@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { cancelDeployment, getDeployment, listAppDeployments, triggerDeployment, triggerRollback } from "../api/deployments";
 import { listApps } from "../api/apps";
-import { CodeValue, EmptyState, formatDateTime, formatDuration, humanizeToken, shortSha, StatusBadge } from "../components/common";
+import { CodeValue, EmptyState, copyToClipboard, formatDateTime, formatDuration, humanizeToken, shortSha, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 import { useDeploymentStream } from "../hooks/useDeploymentStream";
 import { navigateTo } from "../routes";
@@ -16,19 +16,29 @@ export function DeploymentsPage() {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!token) return;
+    let cancelled = false;
     setIsLoading(true);
     loadDeployments(token)
       .then(({ loadedApps, loadedDeployments }) => {
+        if (cancelled) return;
         setApps(loadedApps);
         setDeployments(loadedDeployments);
         setError(null);
       })
-      .catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Could not load deployments"))
-      .finally(() => setIsLoading(false));
-  }, [token]);
+      .catch((loadError: unknown) => {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Could not load deployments");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, reloadKey]);
 
   const appNames = useMemo(() => new Map(apps.map((app) => [app.id, app.name])), [apps]);
 
@@ -40,9 +50,22 @@ export function DeploymentsPage() {
           <h2 id="deployments-title">Deployments</h2>
         </div>
       </div>
-      {error ? <p className="form-error">{error}</p> : null}
+      {error ? <p className="form-error" role="alert">{error}</p> : null}
       {isLoading ? <p className="muted">Loading deployments...</p> : null}
-      {!isLoading && deployments.length === 0 ? (
+      {error && !isLoading && deployments.length === 0 ? (
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() => {
+            setError(null);
+            setIsLoading(true);
+            setReloadKey((key) => key + 1);
+          }}
+        >
+          Retry
+        </button>
+      ) : null}
+      {!isLoading && deployments.length === 0 && !error ? (
         <EmptyState title="No deployments yet" body="Trigger your first deployment from an app page." />
       ) : null}
       <DeploymentTable deployments={deployments} appNames={appNames} />
@@ -61,6 +84,8 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
   const [isRedeploying, setIsRedeploying] = useState(false);
   const [isCanceling, setIsCanceling] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [copyState, setCopyState] = useState<"copied" | "failed" | null>(null);
   const isRunning = isDeploymentActive(deployment?.status);
   const stream = useDeploymentStream(token, deploymentId, Boolean(isRunning));
   const logs = stream.logs.length > 0 ? stream.logs : deployment?.logs ?? [];
@@ -68,16 +93,25 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
 
   useEffect(() => {
     if (!token) return;
+    let cancelled = false;
     setIsLoading(true);
     Promise.all([getDeployment(token, deploymentId), listApps(token)])
       .then(([loadedDeployment, loadedApps]) => {
+        if (cancelled) return;
         setDeployment(loadedDeployment);
         setAppName(loadedApps.find((app) => app.id === loadedDeployment.app_id)?.name ?? null);
         setError(null);
       })
-      .catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Could not load deployment"))
-      .finally(() => setIsLoading(false));
-  }, [deploymentId, token]);
+      .catch((loadError: unknown) => {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Could not load deployment");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deploymentId, token, reloadKey]);
 
   useEffect(() => {
     if (!token || !stream.status) return;
@@ -148,8 +182,9 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
 
   async function handleCopyLogs() {
     const text = logs.map((log) => `[${log.stream}] ${log.line}`).join("\n");
-    await navigator.clipboard?.writeText(text);
-    setNotice("Logs copied");
+    const copied = await copyToClipboard(text);
+    setCopyState(copied ? "copied" : "failed");
+    window.setTimeout(() => setCopyState(null), 1500);
   }
 
   if (isLoading) {
@@ -157,25 +192,47 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
   }
 
   if (!deployment) {
-    return <p className="form-error">{error ?? "Deployment not found"}</p>;
+    return (
+      <section className="detail-layout">
+        <section className="detail-panel">
+          <a className="link-button" href="/deployments" onClick={(event) => { event.preventDefault(); navigateTo("/deployments"); }}>
+            Back to deployments
+          </a>
+          <p className="form-error" role="alert">{error ?? "Deployment not found"}</p>
+          {error ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => {
+                setError(null);
+                setIsLoading(true);
+                setReloadKey((key) => key + 1);
+              }}
+            >
+              Retry
+            </button>
+          ) : null}
+        </section>
+      </section>
+    );
   }
 
   return (
     <section className="detail-layout wide-detail">
       <section className="detail-panel">
-        <button className="link-button" type="button" onClick={() => navigateTo("/deployments")}>
+        <a className="link-button" href="/deployments" onClick={(event) => { event.preventDefault(); navigateTo("/deployments"); }}>
           Back to deployments
-        </button>
+        </a>
         <div className="detail-header">
           <div>
             <p className="eyebrow">Release</p>
-            <h2>{appName ?? "Deployment"} {deployment.kind === "rollback" ? "rollback" : "deploy"}</h2>
+            <h2>{appName ?? "Deployment"} {humanizeToken(deployment.kind)}</h2>
             <p>{deployment.id}</p>
           </div>
           {displayStatus ? <StatusBadge label={displayStatus} tone={deploymentStatusTone(displayStatus)} /> : null}
         </div>
-        {notice ? <p className="success-message">{notice}</p> : null}
-        {error ? <p className="form-error">{error}</p> : null}
+        {notice ? <p className="success-message" role="status">{notice}</p> : null}
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
         {stream.reconnecting ? <p className="metadata-note">Stream connection dropped — reconnecting…</p> : null}
         {stream.error ? <p className="form-error">{stream.error}</p> : null}
         {isRunning ? (
@@ -229,7 +286,7 @@ export function DeploymentDetailPage({ deploymentId }: { deploymentId: string })
           <h2 id="deployment-logs-title">Logs</h2>
           <div className="row-actions">
             <button className="secondary-button" type="button" onClick={() => void handleCopyLogs()} disabled={logs.length === 0}>
-              Copy logs
+              {copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy logs"}
             </button>
             <button className="secondary-button" type="button" onClick={() => setAutoScroll((current) => !current)}>
               {autoScroll ? "Pause scroll" : "Resume scroll"}
@@ -252,8 +309,8 @@ export function DeploymentTable({
   if (deployments.length === 0) return null;
 
   return (
-    <div className="deployment-table" role="table">
-      <div className="deployment-table-row heading" role="row">
+    <div className="deployment-table">
+      <div className="deployment-table-row heading">
         <span>App</span>
         <span>Status</span>
         <span>Kind</span>
@@ -266,8 +323,10 @@ export function DeploymentTable({
         <button
           className="deployment-table-row"
           key={deployment.id}
-          role="row"
           type="button"
+          aria-label={`${deployment.kind === "rollback" ? "Rollback" : "Deploy"} for ${
+            appNames.get(deployment.app_id) ?? deployment.app_id
+          }, ${deployment.status}, opened ${formatDateTime(deployment.started_at)}`}
           onClick={() => navigateTo(`/deployments/${deployment.id}`)}
         >
           <span>{appNames.get(deployment.app_id) ?? deployment.app_id}</span>
