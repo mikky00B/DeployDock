@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+
 import { navigateTo } from "../routes";
 
 const serverSteps = [
@@ -38,6 +40,13 @@ sudo systemctl reload nginx`,
 ];
 
 export function DocsPage() {
+  useEffect(() => {
+    // Footer and marketing links point at sections here (e.g. /docs#cli);
+    // the browser cannot scroll to them until React has rendered the content.
+    const hash = window.location.hash.slice(1);
+    if (hash) document.getElementById(hash)?.scrollIntoView();
+  }, []);
+
   return (
     <section className="docs-layout">
       <section className="docs-hero" aria-labelledby="docs-title">
@@ -107,7 +116,7 @@ deploy ALL=(root) NOPASSWD: /usr/sbin/nginx -t`}</code>
         </div>
       </section>
 
-      <section className="docs-section" aria-labelledby="cli-title">
+      <section className="docs-section" id="cli" aria-labelledby="cli-title">
         <div className="section-heading">
           <div>
             <p className="eyebrow">Command line interface</p>

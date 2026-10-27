@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { copyToClipboard } from "../components/common";
 import { navigateTo } from "../routes";
 
 const LOG_LINES: Array<[string, string, string]> = [
@@ -238,9 +239,9 @@ export function LandingPage() {
 
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
 
-  function copyInstall() {
-    navigator.clipboard?.writeText(INSTALL_COMMAND).catch(() => {});
-    setCopied(true);
+  async function copyInstall() {
+    const succeeded = await copyToClipboard(INSTALL_COMMAND);
+    setCopied(succeeded);
     window.clearTimeout(copyTimer.current);
     copyTimer.current = window.setTimeout(() => setCopied(false), 2000);
   }
@@ -265,9 +266,9 @@ export function LandingPage() {
               <GitHubIcon />
               <span>GitHub</span>
             </a>
-            <button className="btn btn-primary btn-sm" onClick={() => navigateTo("/login")}>
+            <a className="btn btn-primary btn-sm" href="/login" onClick={(event) => { event.preventDefault(); navigateTo("/login"); }}>
               Sign in
-            </button>
+            </a>
           </div>
         </div>
       </nav>
@@ -288,16 +289,28 @@ export function LandingPage() {
               runtime.
             </p>
             <div className="hero-ctas">
-              <button className="btn btn-primary" onClick={() => navigateTo("/docs")}>
+              <a className="btn btn-primary" href="/docs" onClick={(event) => { event.preventDefault(); navigateTo("/docs"); }}>
                 <DownloadIcon />
                 Install DeployDock
-              </button>
+              </a>
               <a className="btn btn-ghost" href={GITHUB_URL} target="_blank" rel="noreferrer">
                 <GitHubIcon />
                 Star on GitHub
               </a>
             </div>
-            <div className="install-line" onClick={copyInstall} role="button" tabIndex={0}>
+            <div
+              className="install-line"
+              onClick={copyInstall}
+              role="button"
+              tabIndex={0}
+              aria-label={`Copy install command: ${INSTALL_COMMAND}`}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  void copyInstall();
+                }
+              }}
+            >
               <span className="prompt">$</span>
               <span>{INSTALL_COMMAND}</span>
               <span className="copy">{copied ? "COPIED ✓" : "COPY"}</span>
@@ -581,10 +594,10 @@ export function LandingPage() {
                 vendor account holding your infrastructure hostage.
               </p>
               <div style={{ marginTop: 28, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <button className="btn btn-primary" onClick={() => navigateTo("/docs")}>
+                <a className="btn btn-primary" href="/docs" onClick={(event) => { event.preventDefault(); navigateTo("/docs"); }}>
                   <DownloadIcon />
                   Install DeployDock
-                </button>
+                </a>
                 <a className="btn btn-ghost" href="/docs">
                   Read the docs →
                 </a>
@@ -617,9 +630,9 @@ export function LandingPage() {
           <h2>Own your deploys.</h2>
           <p>Install DeployDock on any VPS in under 60 seconds. Bring your servers; keep your workflow.</p>
           <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-            <button className="btn btn-primary" onClick={() => navigateTo("/docs")}>
+            <a className="btn btn-primary" href="/docs" onClick={(event) => { event.preventDefault(); navigateTo("/docs"); }}>
               Install DeployDock
-            </button>
+            </a>
             <a className="btn btn-ghost" href={GITHUB_URL} target="_blank" rel="noreferrer">
               View on GitHub
             </a>
@@ -646,10 +659,10 @@ export function LandingPage() {
             </div>
             <div className="footer-col">
               <h5>Developers</h5>
-              <a href="/docs">Documentation</a>
-              <a href="/docs">Install guide</a>
-              <a href="/docs">CLI reference</a>
-              <a href="/docs">Changelog</a>
+              <a href="/docs" onClick={(event) => { event.preventDefault(); navigateTo("/docs"); }}>Documentation</a>
+              <a href="/docs" onClick={(event) => { event.preventDefault(); navigateTo("/docs"); }}>Install guide</a>
+              <a href="/docs#cli">CLI reference</a>
+              <a href={`${GITHUB_URL}/releases`} target="_blank" rel="noreferrer">Changelog</a>
             </div>
             <div className="footer-col">
               <h5>Community</h5>
