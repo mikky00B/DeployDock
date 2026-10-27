@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 
 import { resendVerification, verifyEmail } from "../api/auth";
 import { navigateTo } from "../routes";
+import { popPostAuthRedirect } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 
 type Stage = "register" | "verify";
@@ -26,7 +27,7 @@ export function RegisterPage() {
         setStage("verify");
         setNotice(`We emailed a 6-digit code to ${email}. It expires in 15 minutes.`);
       } else {
-        navigateTo("/dashboard");
+        navigateTo(popPostAuthRedirect());
       }
     } catch {
       setIsSubmitting(false);
@@ -40,7 +41,7 @@ export function RegisterPage() {
     try {
       const response = await verifyEmail({ email, code });
       completeAuth(response);
-      navigateTo("/dashboard");
+      navigateTo(popPostAuthRedirect());
     } catch (verifyError_) {
       setVerifyError(verifyError_ instanceof Error ? verifyError_.message : "Could not verify the code");
       setIsSubmitting(false);
@@ -61,6 +62,14 @@ export function RegisterPage() {
   }
 
   function clearRegisterError() {
+    clearAuthError();
+  }
+
+  function backToRegister() {
+    setStage("register");
+    setCode("");
+    setNotice(null);
+    setVerifyError(null);
     clearAuthError();
   }
 
@@ -107,9 +116,15 @@ export function RegisterPage() {
               </button>
             </form>
             <p className="auth-switch">
-              Didn't get it?{" "}
-              <button type="button" onClick={() => void handleResend()}>
-                Send a new code
+              Didn&apos;t get it?{" "}
+              <button type="button" disabled={isSubmitting} onClick={() => void handleResend()}>
+                {isSubmitting ? "Sending" : "Send a new code"}
+              </button>
+            </p>
+            <p className="auth-switch">
+              Wrong email?{" "}
+              <button type="button" disabled={isSubmitting} onClick={backToRegister}>
+                Back to sign up
               </button>
             </p>
           </>

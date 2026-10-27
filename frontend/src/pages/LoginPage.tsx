@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 
 import { navigateTo } from "../routes";
+import { popPostAuthRedirect } from "../components/common";
 import { resendVerification, verifyEmail } from "../api/auth";
 import { useAuth } from "../hooks/useAuth";
 
@@ -30,7 +31,7 @@ export function LoginPage() {
         setIsSubmitting(false);
         return;
       }
-      navigateTo("/dashboard");
+      navigateTo(popPostAuthRedirect());
     } catch (error) {
       // The hook populates authError; detect the unverified gate from the
       // thrown message and switch to the code form.
@@ -49,7 +50,7 @@ export function LoginPage() {
     try {
       const response = await verifyEmail({ email, code });
       completeAuth(response);
-      navigateTo("/dashboard");
+      navigateTo(popPostAuthRedirect());
     } catch (verifyError_) {
       setVerifyError(verifyError_ instanceof Error ? verifyError_.message : "Could not verify the code");
       setIsSubmitting(false);
@@ -67,6 +68,14 @@ export function LoginPage() {
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  function backToLogin() {
+    setStage("login");
+    setCode("");
+    setNotice(null);
+    setVerifyError(null);
+    clearAuthError();
   }
 
   const shownError = stage === "login" ? authError : verifyError;
@@ -116,9 +125,15 @@ export function LoginPage() {
               </button>
             </form>
             <p className="auth-switch">
-              Didn't get it?{" "}
-              <button type="button" onClick={() => void handleResend()}>
-                Send a new code
+              Didn&apos;t get it?{" "}
+              <button type="button" disabled={isSubmitting} onClick={() => void handleResend()}>
+                {isSubmitting ? "Sending" : "Send a new code"}
+              </button>
+            </p>
+            <p className="auth-switch">
+              Wrong account?{" "}
+              <button type="button" disabled={isSubmitting} onClick={backToLogin}>
+                Back to sign in
               </button>
             </p>
           </>
