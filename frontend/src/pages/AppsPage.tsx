@@ -12,7 +12,7 @@ import {
 } from "../api/apps";
 import { listAppDeployments, triggerDeployment } from "../api/deployments";
 import { listServers } from "../api/servers";
-import { CodeValue, EmptyState, formatDateTime, StatusBadge } from "../components/common";
+import { CodeValue, EmptyState, copyToClipboard, formatDateTime, StatusBadge } from "../components/common";
 import { useAuth } from "../hooks/useAuth";
 import {
   applyBootstrapDefaults,
@@ -57,11 +57,26 @@ export function AppsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!token) return;
-    void loadAppWorkspace(token, setApps, setServers, setForm, setBootstrapForm, setError, setIsLoading);
-  }, [token]);
+    let cancelled = false;
+    void loadAppWorkspace(
+      token,
+      setApps,
+      setServers,
+      setForm,
+      setBootstrapForm,
+      setError,
+      setIsLoading,
+      () => cancelled,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [token, reloadKey]);
 
   const serverNames = useMemo(() => new Map(servers.map((server) => [server.id, server.name])), [servers]);
   const bootstrapPlan = useMemo(() => generateBootstrapPlan(bootstrapForm, servers), [bootstrapForm, servers]);
@@ -75,7 +90,7 @@ export function AppsPage() {
     try {
       const created = await createApp(token, form);
       setApps((current) => [created, ...current]);
-      setForm({ ...emptyAppForm, server_id: servers[0]?.id ?? "" });
+      setForm({ ...emptyAppForm, server_id: form.server_id });
       setNotice("App saved");
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Could not create app");
@@ -93,7 +108,7 @@ export function AppsPage() {
     try {
       const created = await createApp(token, bootstrapPlan.appPayload);
       setApps((current) => [created, ...current]);
-      setBootstrapForm(createEmptyBootstrapForm(bootstrapForm.stack, servers[0]?.id ?? ""));
+      setBootstrapForm(createEmptyBootstrapForm(bootstrapForm.stack, bootstrapForm.server_id));
       setNotice("Bootstrapped app saved to DeployDock");
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Could not save bootstrapped app");
@@ -110,11 +125,14 @@ export function AppsPage() {
     if (!confirmed) return;
     setError(null);
     setNotice(null);
+    setDeletingId(app.id);
     try {
       await deleteApp(token, app.id);
       setApps((current) => current.filter((a) => a.id !== app.id));
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete app");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -127,26 +145,51 @@ export function AppsPage() {
             <h2 id="apps-title">Apps</h2>
           </div>
         </div>
-        {notice ? <p className="success-message">{notice}</p> : null}
-        {error ? <p className="form-error">{error}</p> : null}
+        {notice ? <p className="success-message" role="status">{notice}</p> : null}
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
         {isLoading ? <p className="muted">Loading apps...</p> : null}
-        {!isLoading && apps.length === 0 ? (
+        {error && !isLoading && apps.length === 0 ? (
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => {
+              setError(null);
+              setIsLoading(true);
+              setReloadKey((key) => key + 1);
+            }}
+          >
+            Retry
+          </button>
+        ) : null}
+        {!isLoading && apps.length === 0 && !error ? (
           <EmptyState title="No apps yet" body="Connect an existing app or generate a setup plan for a new VPS app." />
         ) : null}
         <div className="resource-list">
           {apps.map((deployableApp) => (
             <article className="resource-row" key={deployableApp.id}>
               <div>
-                <button className="link-button title-link" type="button" onClick={() => navigateTo(`/apps/${deployableApp.id}`)}>
+                <a
+                  className="link-button title-link"
+                  href={`/apps/${deployableApp.id}`}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    navigateTo(`/apps/${deployableApp.id}`);
+                  }}
+                >
                   {deployableApp.name}
-                </button>
+                </a>
                 <p>{serverNames.get(deployableApp.server_id) ?? "Unknown server"} · {deployableApp.branch} · {deployableApp.app_path}</p>
-                <p className="metadata-note">Last successful: <CodeValue value={deployableApp.last_successful_commit} /></p>
+                <p className="metadata-note">Last successful commit: <CodeValue value={deployableApp.last_successful_commit} /></p>
               </div>
               <StatusBadge label={deployableApp.service_name ?? "no service"} />
               <div className="row-actions">
-                <button className="danger-button" type="button" onClick={() => void handleDelete(deployableApp)}>
-                  Delete
+                <button
+                  className="danger-button"
+                  type="button"
+                  disabled={deletingId === deployableApp.id}
+                  onClick={() => void handleDelete(deployableApp)}
+                >
+                  {deletingId === deployableApp.id ? "Deleting" : "Delete"}
                 </button>
               </div>
             </article>
@@ -208,21 +251,36 @@ export function AppDetailPage({ appId }: { appId: string }) {
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!token) return;
+    let cancelled = false;
     setIsLoading(true);
+    setDeployableApp(null);
+    setDeployments([]);
+    setServiceStatus(null);
+    setServiceLogs(null);
+    setNotice(null);
     Promise.all([getApp(token, appId), listServers(token), listAppDeployments(token, appId)])
       .then(([loadedApp, loadedServers, loadedDeployments]) => {
+        if (cancelled) return;
         setDeployableApp(loadedApp);
         setServers(loadedServers);
         setDeployments(loadedDeployments);
         setForm(appToForm(loadedApp));
         setError(null);
       })
-      .catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Could not load app"))
-      .finally(() => setIsLoading(false));
-  }, [appId, token]);
+      .catch((loadError: unknown) => {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Could not load app");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId, token, reloadKey]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -313,7 +371,29 @@ export function AppDetailPage({ appId }: { appId: string }) {
   }
 
   if (!deployableApp) {
-    return <p className="form-error">{error ?? "App not found"}</p>;
+    return (
+      <section className="detail-layout">
+        <section className="detail-panel">
+          <a className="link-button" href="/apps" onClick={(event) => { event.preventDefault(); navigateTo("/apps"); }}>
+            Back to apps
+          </a>
+          <p className="form-error" role="alert">{error ?? "App not found"}</p>
+          {error ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => {
+                setError(null);
+                setIsLoading(true);
+                setReloadKey((key) => key + 1);
+              }}
+            >
+              Retry
+            </button>
+          ) : null}
+        </section>
+      </section>
+    );
   }
 
   const serverName = servers.find((server) => server.id === deployableApp.server_id)?.name ?? "Unknown server";
@@ -325,9 +405,9 @@ export function AppDetailPage({ appId }: { appId: string }) {
   return (
     <section className="detail-layout">
       <section className="detail-panel">
-        <button className="link-button" type="button" onClick={() => navigateTo("/apps")}>
+        <a className="link-button" href="/apps" onClick={(event) => { event.preventDefault(); navigateTo("/apps"); }}>
           Back to apps
-        </button>
+        </a>
         <div className="detail-header">
           <div>
             <p className="eyebrow">App operations</p>
@@ -338,7 +418,7 @@ export function AppDetailPage({ appId }: { appId: string }) {
         </div>
         <section className="operation-banner">
           <div>
-            <h3>Deploy current app workflow</h3>
+            <h3>Deploy this app</h3>
             <p>Runs the configured deploy command on the server and streams logs into deployment history.</p>
           </div>
           <button className="primary-inline-button" disabled={isDeploying} type="button" onClick={() => void handleDeploy()}>
@@ -355,8 +435,8 @@ export function AppDetailPage({ appId }: { appId: string }) {
           <div><dt>Updated</dt><dd>{formatDateTime(deployableApp.updated_at)}</dd></div>
         </dl>
         </section>
-        {notice ? <p className="success-message">{notice}</p> : null}
-        {error ? <p className="form-error">{error}</p> : null}
+        {notice ? <p className="success-message" role="status">{notice}</p> : null}
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
         <section className="nested-section" aria-labelledby="service-controls-title">
           <div className="section-heading">
             <div>
@@ -432,6 +512,9 @@ function AppForm({
             <option key={server.id} value={server.id}>{server.name}</option>
           ))}
         </select>
+        {servers.length === 0 ? (
+          <span className="field-warning">Connect a server first. Apps must be assigned to a server.</span>
+        ) : null}
       </label>
       <label>Name<input required value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} /></label>
       <label>Repository URL<input required placeholder="git@github.com:org/repo.git" value={form.repository_url} onChange={(event) => onChange({ ...form, repository_url: event.target.value })} /></label>
@@ -453,8 +536,8 @@ function AppForm({
           Use the public URL DeployDock can reach, for example https://app.example.com/api/v1/health/. For apps behind Nginx,
           make sure the domain or IP routes to the app.
         </span>
-        {form.healthcheck_url?.endsWith("/health/") ? (
-          <span className="field-warning">Confirm this route exists. Some APIs expose health at /api/v1/health/.</span>
+        {form.healthcheck_url && !form.healthcheck_url.endsWith("/health/") ? (
+          <span className="field-warning">Many apps expose health at /api/v1/health/. Confirm this route exists before relying on it.</span>
         ) : null}
       </label>
       <label>
@@ -507,6 +590,7 @@ function ModeSelector({
       <button
         className={mode === "existing" ? "active" : ""}
         type="button"
+        aria-pressed={mode === "existing"}
         onClick={() => onChange("existing")}
       >
         <strong>Connect existing app</strong>
@@ -515,6 +599,7 @@ function ModeSelector({
       <button
         className={mode === "bootstrap" ? "active" : ""}
         type="button"
+        aria-pressed={mode === "bootstrap"}
         onClick={() => onChange("bootstrap")}
       >
         <strong>Bootstrap new app</strong>
@@ -620,6 +705,9 @@ function BootstrapFormPanel({
               <option key={server.id} value={server.id}>{server.name} ({server.username})</option>
             ))}
           </select>
+          {servers.length === 0 ? (
+            <span className="field-warning">Connect a server first. Apps must be assigned to a server.</span>
+          ) : null}
         </label>
         <label>App name<input required value={form.app_name} onChange={(event) => updateAppName(event.target.value)} /></label>
         <label>Repository URL<input required placeholder="git@github.com:org/repo.git" value={form.repository_url} onChange={(event) => update({ repository_url: event.target.value })} /></label>
@@ -806,14 +894,9 @@ function PlanSection({ section }: { section: BootstrapPlanSection }) {
   const [copyLabel, setCopyLabel] = useState("Copy");
 
   async function handleCopy() {
-    try {
-      await navigator.clipboard.writeText(section.content);
-      setCopyLabel("Copied");
-      window.setTimeout(() => setCopyLabel("Copy"), 1500);
-    } catch {
-      setCopyLabel("Copy failed");
-      window.setTimeout(() => setCopyLabel("Copy"), 1500);
-    }
+    const copied = await copyToClipboard(section.content);
+    setCopyLabel(copied ? "Copied" : "Copy failed");
+    window.setTimeout(() => setCopyLabel("Copy"), 1500);
   }
 
   return (
@@ -842,18 +925,21 @@ async function loadAppWorkspace(
   setBootstrapForm: (form: BootstrapForm) => void,
   setError: (error: string | null) => void,
   setIsLoading: (isLoading: boolean) => void,
+  isCancelled: () => boolean = () => false,
 ) {
   try {
     const [loadedApps, loadedServers] = await Promise.all([listApps(token), listServers(token)]);
+    if (isCancelled()) return;
     setApps(loadedApps);
     setServers(loadedServers);
     setForm({ ...emptyAppForm, server_id: loadedServers[0]?.id ?? "" });
     setBootstrapForm(createEmptyBootstrapForm("django", loadedServers[0]?.id ?? ""));
     setError(null);
   } catch (loadError) {
+    if (isCancelled()) return;
     setError(loadError instanceof Error ? loadError.message : "Could not load apps");
   } finally {
-    setIsLoading(false);
+    if (!isCancelled()) setIsLoading(false);
   }
 }
 

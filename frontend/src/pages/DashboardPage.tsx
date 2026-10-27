@@ -12,25 +12,54 @@ export function DashboardPage() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!token) return;
+    let cancelled = false;
     setIsLoading(true);
     getDashboard(token)
       .then((loadedDashboard) => {
+        if (cancelled) return;
         setDashboard(loadedDashboard);
         setError(null);
       })
-      .catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Could not load dashboard"))
-      .finally(() => setIsLoading(false));
-  }, [token]);
+      .catch((loadError: unknown) => {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Could not load dashboard");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, reloadKey]);
 
   if (isLoading) {
     return <DashboardSkeleton userLabel={user?.full_name || user?.email || "Account"} />;
   }
 
   if (!dashboard) {
-    return <p className="form-error">{error ?? "Dashboard unavailable"}</p>;
+    return (
+      <section className="dashboard-layout">
+        <section className="dashboard-panel">
+          <p className="form-error" role="alert">{error ?? "Dashboard unavailable"}</p>
+          {error ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => {
+                setError(null);
+                setIsLoading(true);
+                setReloadKey((key) => key + 1);
+              }}
+            >
+              Retry
+            </button>
+          ) : null}
+        </section>
+      </section>
+    );
   }
 
   const appNames = new Map(dashboard.recent_apps.map((app) => [app.id, app.name]));
@@ -48,7 +77,13 @@ export function DashboardPage() {
           label="Connected servers"
           value={`${dashboard.summary.connected_servers}/${dashboard.summary.total_servers}`}
           helper="Infrastructure reachable by DeployDock"
-          tone={dashboard.summary.total_servers > 0 && dashboard.summary.connected_servers === dashboard.summary.total_servers ? "success" : "neutral"}
+          tone={
+            dashboard.summary.total_servers > 0 && dashboard.summary.connected_servers === dashboard.summary.total_servers
+              ? "success"
+              : dashboard.summary.connected_servers > 0
+                ? "warning"
+                : "neutral"
+          }
         />
         <SummaryCard label="Apps deployed" value={`${dashboard.summary.deployed_apps}/${dashboard.summary.total_apps}`} helper="Registered server apps" />
         <SummaryCard label="Recent failures" value={String(dashboard.summary.recent_failures)} helper="in last 7 days" tone={dashboard.summary.recent_failures > 0 ? "danger" : "success"} />
@@ -57,7 +92,7 @@ export function DashboardPage() {
       <section className="dashboard-panels">
         <DashboardPanel
           title="Recent deployments"
-          action={<button className="link-button" type="button" onClick={() => navigateTo("/deployments")}>View all deployments</button>}
+          action={<a className="link-button" href="/deployments" onClick={(event) => { event.preventDefault(); navigateTo("/deployments"); }}>View all deployments</a>}
           emptyText="No deployments yet. Trigger your first deployment from an app page."
           emptyAction={{ label: "Go to your apps", route: "/apps" }}
         >
@@ -78,7 +113,7 @@ export function DashboardPage() {
             <article className="activity-row static" key={event.id}>
               <div>
                 <strong>{humanizeToken(event.action)}</strong>
-                <span>{event.action} · {event.entity_type} · {formatDateTime(event.created_at)}</span>
+                <span>{humanizeToken(event.entity_type)} · {formatDateTime(event.created_at)}</span>
               </div>
             </article>
           ))}
@@ -90,7 +125,7 @@ export function DashboardPage() {
           emptyAction={{ label: "Add your first server", route: "/servers" }}
         >
           {dashboard.recent_servers.map((server) => (
-            <button className="activity-row" key={server.id} type="button" onClick={() => navigateTo("/servers")}>
+            <button className="activity-row" key={server.id} type="button" onClick={() => navigateTo(`/servers/${server.id}`)}>
               <div>
                 <strong>{server.name}</strong>
                 <span>{server.host}</span>
