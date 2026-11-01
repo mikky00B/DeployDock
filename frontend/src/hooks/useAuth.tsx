@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import { getCurrentUser, login, logout, register, type AuthResponse, type LoginPayload, type RegisterPayload } from "../api/auth";
+import { setUnauthorizedHandler } from "../api/client";
 import type { User } from "../types/auth";
 
 const TOKEN_STORAGE_KEY = "deploydock.access_token";
@@ -73,6 +74,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(nextToken);
     setUser(nextUser);
     setAuthError(null);
+  }, []);
+
+  // An authenticated request answered 401 means the token expired or was
+  // revoked: clear the session and let the route guard send the user to
+  // login, instead of leaving every page showing API errors forever.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      setToken(null);
+      setUser(null);
+    });
+    return () => setUnauthorizedHandler(null);
   }, []);
 
   const signIn = useCallback(

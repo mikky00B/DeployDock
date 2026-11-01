@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { apiClient } from "./client";
+import { apiClient, setUnauthorizedHandler } from "./client";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -87,5 +87,42 @@ describe("apiClient.request", () => {
       message: expect.stringContaining("Could not reach the API"),
       cause: networkError,
     });
+  });
+});
+
+describe("unauthorized handling", () => {
+  afterEach(() => {
+    setUnauthorizedHandler(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("invokes the handler when an authenticated request comes back 401", async () => {
+    let called = 0;
+    setUnauthorizedHandler(() => {
+      called += 1;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "expired" }), { status: 401 })),
+    );
+
+    await expect(apiClient.request("/api/v1/apps", { token: "tok" })).rejects.toThrow("expired");
+    expect(called).toBe(1);
+  });
+
+  it("does not invoke the handler for anonymous 401s (bad login credentials)", async () => {
+    let called = 0;
+    setUnauthorizedHandler(() => {
+      called += 1;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "invalid credentials" }), { status: 401 })),
+    );
+
+    await expect(apiClient.request("/api/v1/auth/login", { method: "POST" })).rejects.toThrow(
+      "invalid credentials",
+    );
+    expect(called).toBe(0);
   });
 });

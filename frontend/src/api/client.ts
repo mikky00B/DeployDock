@@ -10,6 +10,16 @@ type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
 };
 
+// Invoked when an authenticated request comes back 401 (expired or revoked
+// token). Login and register calls attach no token, so bad credentials on
+// those never trip it. useAuth registers the handler that clears the session.
+type UnauthorizedHandler = () => void;
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler;
+}
+
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { token, body, headers, ...init } = options;
   const url = `${baseUrl}${path}`;
@@ -36,6 +46,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       );
     }
     throw error;
+  }
+
+  if (response.status === 401 && token) {
+    // The session is no longer valid; surface it to the auth layer before the
+    // caller turns the 401 into a page-level error string.
+    unauthorizedHandler?.();
   }
 
   if (!response.ok) {
