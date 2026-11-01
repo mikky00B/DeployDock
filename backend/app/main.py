@@ -63,11 +63,13 @@ async def lifespan(_: FastAPI):
                 "; ".join(weak),
             )
 
-    # Agents can die mid-deploy while this process keeps running, so the
-    # command-lease sweep has to be periodic, not startup-only.
-    sweep_task = asyncio.create_task(
-        _periodic_command_reclaim(settings.agent_reclaim_sweep_seconds)
-    )
+    # Two things need periodic sweeps while this process runs:
+    #   - agent commands whose lease expired (agent died mid-deploy);
+    #   - deployments stuck active because their runner was lost (e.g. a
+    #     background task that died without the process exiting). The startup
+    #     sweep only covers restarts; without this, such a row would block
+    #     the app's next deploy until a restart.
+    sweep_task = asyncio.create_task(_periodic_sweeps(settings.agent_reclaim_sweep_seconds))
     try:
         yield
     finally:
@@ -76,7 +78,7 @@ async def lifespan(_: FastAPI):
             await sweep_task
 
 
-async def _periodic_command_reclaim(every_seconds: int) -> None:
+async def _periodic_sweeps(every_seconds: int) -> None:
     while True:
         await asyncio.sleep(every_seconds)
         try:
@@ -87,6 +89,16 @@ async def _periodic_command_reclaim(every_seconds: int) -> None:
                 )
         except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
             logger.exception("Periodic agent command reclaim failed")
+        try:
+            async with AsyncSessionLocal() as session:
+                reclaimed = await fail_orphaned_deployments(
+                    session,
+                    older_than_seconds=settings.orphan_deployment_timeout_seconds,
+                )
+            if reclaimed:
+                logger.warning("Marked %s stuck deployment(s) as failed", reclaimed)
+        except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
+            logger.exception("Periodic orphaned-deployment sweep failed")
 
 
 app = FastAPI(title="DeployDock API", lifespan=lifespan)
