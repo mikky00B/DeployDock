@@ -139,3 +139,50 @@ async def test_redis_backend_counts_and_sets_a_ttl() -> None:
 
     await backend.reset("email:owner@example.com")
     assert await backend.count("email:owner@example.com") == 0
+
+
+class _StubRequest:
+    def __init__(self, headers: dict[str, str], client_host: str | None = "198.51.100.7"):
+        # client_ip reads lowercase header names; starlette headers are
+        # case-insensitive, so normalize here the same way.
+        self.headers = {key.lower(): value for key, value in headers.items()}
+
+        class _Client:
+            host = client_host
+
+        self.client = _Client() if client_host is not None else None
+
+
+class _StubSettings:
+    def __init__(self, trust_proxy_headers: bool):
+        self.trust_proxy_headers = trust_proxy_headers
+
+
+def test_client_ip_ignores_forwarded_for_without_trust() -> None:
+    from app.core.rate_limit import client_ip
+
+    request = _StubRequest({"X-Forwarded-For": "1.2.3.4, 10.0.0.9"})
+    assert client_ip(request, _StubSettings(False)) == "198.51.100.7"
+
+
+def test_client_ip_uses_the_rightmost_forwarded_hop() -> None:
+    """The proxy appends the real client address; the leftmost entry is
+    client-chosen and must never be trusted for rate-limit keys."""
+    from app.core.rate_limit import client_ip
+
+    request = _StubRequest({"X-Forwarded-For": "1.2.3.4, 10.0.0.9"})
+    assert client_ip(request, _StubSettings(True)) == "10.0.0.9"
+
+
+def test_client_ip_rightmost_skips_empty_hops() -> None:
+    from app.core.rate_limit import client_ip
+
+    request = _StubRequest({"X-Forwarded-For": " , 10.0.0.9, "})
+    assert client_ip(request, _StubSettings(True)) == "10.0.0.9"
+
+
+def test_client_ip_falls_back_to_socket_without_header() -> None:
+    from app.core.rate_limit import client_ip
+
+    request = _StubRequest({})
+    assert client_ip(request, _StubSettings(True)) == "198.51.100.7"

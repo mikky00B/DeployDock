@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import secrets
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
@@ -124,10 +125,36 @@ async def readiness() -> dict[str, str]:
     return {"status": "ok", "database": "reachable"}
 
 
+def _metrics_authorized(request: Request) -> bool:
+    """Bearer-token gate for /metrics; development stays open without a token."""
+    if settings.metrics_token:
+        scheme, _, token = request.headers.get("authorization", "").partition(" ")
+        return scheme.lower() == "bearer" and secrets.compare_digest(
+            token.strip(), settings.metrics_token
+        )
+    return not settings.is_production
+
+
 @app.get("/metrics")
-async def metrics() -> Response:
+async def metrics(request: Request) -> Response:
     """Prometheus-text metrics (spec §48): deployment totals, durations, and
-    agent liveness. Rendered without a client library on purpose."""
+    agent liveness. Rendered without a client library on purpose.
+
+    The counts reveal fleet sizes (servers, apps, agents online) — useful to
+    an attacker sizing up an internet-facing panel. With METRICS_TOKEN set the
+    endpoint requires that bearer token; without one it is development-only
+    and answers 404 in production.
+    """
+    if not _metrics_authorized(request):
+        if settings.metrics_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="metrics require a valid METRICS_TOKEN bearer token",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="metrics are disabled (set METRICS_TOKEN to enable them)",
+        )
     from sqlalchemy import func, select
 
     from app.models import Agent, App, Deployment, Server

@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # Only enable behind a reverse proxy you control, otherwise clients can
     # spoof their address.
     trust_proxy_headers: bool = Field(default=False, alias="TRUST_PROXY_HEADERS")
+    # /metrics is unauthenticated in development but hidden in production
+    # unless a shared token is set: the endpoint reveals fleet sizes (servers,
+    # apps, agents online), which is reconnaissance on an internet-facing
+    # panel. Set METRICS_TOKEN and scrape with `Authorization: Bearer <token>`.
+    metrics_token: str = Field(default="", alias="METRICS_TOKEN")
     register_max_attempts: int = Field(default=10, alias="REGISTER_MAX_ATTEMPTS")
     register_window_seconds: int = Field(default=3600, alias="REGISTER_WINDOW_SECONDS")
 

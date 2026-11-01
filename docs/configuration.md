@@ -67,9 +67,22 @@ one IP can legitimately front many users behind NAT or a reverse proxy.
 Registration is public, so every attempt counts against the source address.
 
 `TRUST_PROXY_HEADERS` only enable behind a reverse proxy you control: it makes
-`client_ip()` read the first `X-Forwarded-For` hop instead of the socket
-address. With it off (the default), a spoofed header is ignored; with it on
-behind nginx, the proxy must actually set the header.
+`client_ip()` read the *rightmost* `X-Forwarded-For` hop instead of the socket
+address — the hop your proxy appended, which the client cannot rewrite. With
+it off (the default), a spoofed header is ignored; with it on behind nginx,
+the proxy must actually set the header.
+
+## /metrics
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `METRICS_TOKEN` | *(empty)* | Bearer token required by `GET /metrics` |
+
+`/metrics` exposes fleet counts (servers, apps, agents online, deployment
+totals by status) — reconnaissance value on an internet-facing panel. It is
+open in development; in production it answers 404 unless `METRICS_TOKEN` is
+set, and then requires `Authorization: Bearer <METRICS_TOKEN>` on every
+scrape.
 
 Without `REDIS_URL` the limiter is per-process and the app logs a warning at
 startup. With more than one uvicorn worker that means the effective limit is

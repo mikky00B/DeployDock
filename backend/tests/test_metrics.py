@@ -65,3 +65,41 @@ def test_metrics_endpoint_renders_prometheus_text(metrics_client: TestClient) ->
     ):
         assert f'status="{status_value}"' in body
 
+
+
+def test_metrics_requires_token_when_configured(metrics_client: TestClient, monkeypatch) -> None:
+    import app.main as main_module
+    from app.core.config import Settings
+
+    settings = Settings(
+        app_env="development",
+        secret_key="x" * 40,
+        encryption_key="y" * 40,
+        metrics_token="scrape-me-123",
+    )
+    monkeypatch.setattr(main_module, "settings", settings)
+
+    anonymous = metrics_client.get("/metrics")
+    assert anonymous.status_code == 401
+
+    wrong = metrics_client.get("/metrics", headers={"Authorization": "Bearer nope"})
+    assert wrong.status_code == 401
+
+    ok = metrics_client.get("/metrics", headers={"Authorization": "Bearer scrape-me-123"})
+    assert ok.status_code == 200
+
+
+def test_metrics_hidden_in_production_without_token(metrics_client: TestClient, monkeypatch) -> None:
+    import app.main as main_module
+    from app.core.config import Settings
+
+    settings = Settings(
+        app_env="production",
+        secret_key="x" * 40,
+        encryption_key="y" * 40,
+        cors_origins="https://dock.example.com",
+    )
+    monkeypatch.setattr(main_module, "settings", settings)
+
+    response = metrics_client.get("/metrics")
+    assert response.status_code == 404

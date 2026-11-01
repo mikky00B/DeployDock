@@ -185,11 +185,18 @@ def client_ip(request, settings) -> str:
     Only trusts X-Forwarded-For when TRUST_PROXY_HEADERS is set — otherwise any
     client could spoof it. Behind a reverse proxy you control, set it so every
     user does not share the proxy's single bucket.
+
+    The *rightmost* hop is used: the proxy appends the real client address to
+    any XFF chain the client supplied, so the leftmost entry is client-chosen
+    and an attacker could rotate fake IPs to multiply their rate-limit buckets.
+    With exactly one proxy hop, the rightmost entry is that proxy's view of the
+    client — the trustworthy one.
     """
     if settings.trust_proxy_headers:
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            first_hop = forwarded.split(",")[0].strip()
-            if first_hop:
-                return first_hop
+            hops = [hop.strip() for hop in forwarded.split(",")]
+            rightmost = next((hop for hop in reversed(hops) if hop), "")
+            if rightmost:
+                return rightmost
     return request.client.host if request.client else "unknown"
