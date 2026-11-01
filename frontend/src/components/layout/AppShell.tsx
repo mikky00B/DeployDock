@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { navigateTo, type AppRoute } from "../../routes";
 import { useAuth } from "../../hooks/useAuth";
 
@@ -16,25 +18,39 @@ const navItems: Array<{ route: AppRoute; label: string }> = [
 
 export function AppShell({ activeRoute, children }: AppShellProps) {
   const { user, signOut } = useAuth();
+  const [isSigningOut, setIsSigningOut] = useState(false);
+
+  async function handleSignOut() {
+    setIsSigningOut(true);
+    try {
+      await signOut();
+    } finally {
+      setIsSigningOut(false);
+    }
+  }
 
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <button className="brand-button" type="button" onClick={() => navigateTo("/dashboard")}>
+        <a className="brand-button" href="/dashboard" onClick={(event) => { event.preventDefault(); navigateTo("/dashboard"); }}>
           <span>DeployDock</span>
           <small>Deployment control panel</small>
-        </button>
+        </a>
         <nav aria-label="Primary navigation">
           <p className="nav-group-label">Workspace</p>
           {navItems.map((item) => (
-            <button
+            <a
+              aria-current={activeRoute === item.route ? "page" : undefined}
               className={activeRoute === item.route ? "nav-link active" : "nav-link"}
+              href={item.route}
               key={item.route}
-              type="button"
-              onClick={() => navigateTo(item.route)}
+              onClick={(event) => {
+                event.preventDefault();
+                navigateTo(item.route);
+              }}
             >
               {item.label}
-            </button>
+            </a>
           ))}
         </nav>
       </aside>
@@ -48,8 +64,8 @@ export function AppShell({ activeRoute, children }: AppShellProps) {
           <p className="topbar-copy">Self-hosted deployment control for existing VPS apps.</p>
           <div className="account-menu">
             <span>{user?.email}</span>
-            <button className="secondary-button" type="button" onClick={() => void signOut()}>
-              Sign out
+            <button className="secondary-button" type="button" disabled={isSigningOut} onClick={() => void handleSignOut()}>
+              {isSigningOut ? "Signing out" : "Sign out"}
             </button>
           </div>
         </header>

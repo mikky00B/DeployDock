@@ -32,6 +32,16 @@
   box-sizing: border-box;
 }
 
+.visually-hidden {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -137,12 +147,17 @@ a {
   align-items: center;
   background: transparent;
   border: 0;
+  color: var(--fg);
   display: grid;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   gap: 3px;
   margin-bottom: 30px;
   padding: 0 0 0 38px;
   position: relative;
   text-align: left;
+  text-decoration: none;
   width: 100%;
   z-index: 1;
 }
@@ -210,11 +225,13 @@ a {
   border: 1px solid transparent;
   border-radius: 8px;
   color: var(--fg-2);
+  display: block;
   font-size: 14px;
   font-weight: 500;
   min-height: 40px;
   padding: 9px 11px;
   text-align: left;
+  text-decoration: none;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
@@ -286,11 +303,13 @@ a {
   align-items: center;
   border: 1px solid transparent;
   border-radius: 8px;
+  color: var(--accent-ink);
   display: inline-flex;
   font-weight: 500;
   justify-content: center;
   min-height: 40px;
   padding: 0 16px;
+  text-decoration: none;
   transition: transform 0.08s ease, background 0.15s ease, border-color 0.15s ease, filter 0.15s ease;
 }
 
@@ -554,6 +573,7 @@ a {
   color: var(--accent);
   font-weight: 500;
   padding: 0;
+  text-decoration: none;
 }
 
 .auth-switch button:hover,
@@ -785,6 +805,7 @@ a {
   font-weight: 600;
   letter-spacing: -0.01em;
   text-align: left;
+  text-decoration: none;
 }
 
 .status-badge {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { AppShell } from "./components/layout/AppShell";
+import { stashPostAuthRedirect } from "./components/common";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { AppDetailPage, AppsPage } from "./pages/AppsPage";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -10,7 +11,18 @@ import { LandingPage } from "./pages/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
 import { ServerDetailPage, ServersPage } from "./pages/ServersPage";
-import { getCurrentRoute, navigateTo, type RouteState } from "./routes";
+import { getCurrentRoute, isKnownPathname, navigateTo, type AppRoute, type RouteState } from "./routes";
+
+const PAGE_TITLES: Record<AppRoute, string> = {
+  "/": "DeployDock — Deployment control panel for VPS",
+  "/login": "Sign in — DeployDock",
+  "/register": "Create account — DeployDock",
+  "/dashboard": "Dashboard — DeployDock",
+  "/servers": "Servers — DeployDock",
+  "/apps": "Apps — DeployDock",
+  "/deployments": "Deployments — DeployDock",
+  "/docs": "Guide — DeployDock",
+};
 
 function App() {
   return (
@@ -40,6 +52,7 @@ function RouterView() {
     if (route.route === "/" || route.route === "/docs") return;
 
     if (!user && route.route !== "/login" && route.route !== "/register") {
+      stashPostAuthRedirect();
       navigateTo("/login");
       return;
     }
@@ -48,6 +61,16 @@ function RouterView() {
       navigateTo("/dashboard");
     }
   }, [isLoading, route, user]);
+
+  useEffect(() => {
+    // Detail routes keep their section title; unknown paths render the
+    // dashboard, so normalize the URL to match instead of leaving /foo up.
+    if (!isKnownPathname(window.location.pathname)) {
+      window.history.replaceState({}, "", "/dashboard");
+    }
+    document.title = PAGE_TITLES[route.route] ?? "DeployDock";
+    window.scrollTo(0, 0);
+  }, [route]);
 
   if (isLoading) {
     return (
@@ -64,19 +87,30 @@ function RouterView() {
   if (route.route === "/docs" && !user) {
     return (
       <main style={{ maxWidth: 1080, margin: "0 auto", padding: "32px 24px 64px" }}>
+        <h1 className="visually-hidden">DeployDock guide</h1>
         <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 28 }}>
-          <button
+          <a
             className="brand-button"
-            type="button"
-            onClick={() => navigateTo("/")}
+            href="/"
+            onClick={(event) => {
+              event.preventDefault();
+              navigateTo("/");
+            }}
             style={{ margin: 0, width: "auto", textAlign: "left" }}
           >
             <span>DeployDock</span>
             <small>Deployment control panel</small>
-          </button>
-          <button className="primary-inline-button" type="button" onClick={() => navigateTo("/login")}>
+          </a>
+          <a
+            className="primary-inline-button"
+            href="/login"
+            onClick={(event) => {
+              event.preventDefault();
+              navigateTo("/login");
+            }}
+          >
             Sign in
-          </button>
+          </a>
         </header>
         <DocsPage />
       </main>

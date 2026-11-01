@@ -1,3 +1,24 @@
+import type { NavigateTarget } from "../routes";
+
+const POST_AUTH_REDIRECT_KEY = "deploydock.post_auth_redirect";
+
+/** Remember where an unauthenticated visitor was heading so login can return there. */
+export function stashPostAuthRedirect() {
+  const path = window.location.pathname;
+  if (path !== "/login" && path !== "/register") {
+    sessionStorage.setItem(POST_AUTH_REDIRECT_KEY, path);
+  }
+}
+
+/** Returns the stashed destination, or /dashboard when there is none. */
+export function popPostAuthRedirect(): NavigateTarget {
+  const saved = sessionStorage.getItem(POST_AUTH_REDIRECT_KEY);
+  sessionStorage.removeItem(POST_AUTH_REDIRECT_KEY);
+  // Only authenticated routes ever get stashed (login/register are excluded),
+  // so the saved path is always a valid navigation target.
+  return (saved as NavigateTarget | null) ?? "/dashboard";
+}
+
 type StatusBadgeProps = {
   label: string;
   tone?: "neutral" | "success" | "danger" | "warning";
@@ -48,4 +69,33 @@ export function humanizeToken(value: string) {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+/**
+ * Self-hosted installs often run over plain HTTP, where the async Clipboard API
+ * is unavailable, so fall back to a hidden textarea before reporting failure.
+ */
+export async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Insecure context or permission denied — try the legacy path below.
+  }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return copied;
+  } catch {
+    return false;
+  }
 }
