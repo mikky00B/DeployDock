@@ -15,7 +15,20 @@ those same commands.
 
 ## Option A: Docker Compose
 
+The fastest path is the installer — it checks prerequisites, writes
+`backend/.env` with generated secrets, and brings the stack up:
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/mikky00B/DeployDock/master/install.sh | bash
+```
+
+Run it from an existing checkout with `./install.sh` to skip the clone step.
+It never overwrites an existing `backend/.env`.
+
+Prefer doing it by hand? The installer is exactly these four steps:
+
+```bash
+git clone https://github.com/mikky00B/DeployDock.git && cd DeployDock
 cp backend/.env.example backend/.env
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # SECRET_KEY
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # ENCRYPTION_KEY

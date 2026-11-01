@@ -230,7 +230,7 @@ const FACTS: Array<[string, string]> = [
 ];
 
 const GITHUB_URL = "https://github.com/mikky00B/DeployDock";
-const INSTALL_COMMAND = `git clone ${GITHUB_URL}.git`;
+const INSTALL_COMMAND = `curl -fsSL https://raw.githubusercontent.com/mikky00B/DeployDock/master/install.sh | bash`;
 
 export function LandingPage() {
   const logLines = useHeroLog();
