@@ -20,7 +20,8 @@ const defaultHeartbeatIntervalSeconds = 30
 
 // commandPollInterval is how often the agent asks for queued work. Deploy
 // latency is bounded by this interval; 5s keeps push-to-deploy snappy.
-const commandPollInterval = 5 * time.Second
+// A var so tests can shorten it.
+var commandPollInterval = 5 * time.Second
 
 // Register exchanges a control-plane registration token for a persistent
 // agent token and stores the resulting state.
