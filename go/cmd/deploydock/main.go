@@ -162,10 +162,11 @@ func cmdMCP(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if config.Token == "" {
-			return fmt.Errorf("not signed in: run 'deploydock login' first")
+		apiURL, token := cli.ResolveCredentials(config.APIURL, config.Token)
+		if token == "" {
+			return fmt.Errorf("not signed in: run 'deploydock login' or set DEPLOYDOCK_TOKEN")
 		}
-		api := cli.NewAPI(config.APIURL, config.Token)
+		api := cli.NewAPI(apiURL, token)
 		server := &mcp.Server{API: api, In: os.Stdin, Out: os.Stdout}
 		return server.Run(ctx)
 	case "setup":

@@ -113,3 +113,21 @@ func LoadProjectConfig(path string) (*ProjectConfig, error) {
 	}
 	return project, nil
 }
+
+// ResolveCredentials applies the mcp-setup environment fallbacks to a loaded
+// config: `mcp setup` writes DEPLOYDOCK_URL/DEPLOYDOCK_TOKEN into the coding
+// agents' configs, and `mcp serve` must honor them so it works on machines
+// (or HOMEs) where no interactive login ever happened. The URL additionally
+// falls back to the default control-plane address.
+func ResolveCredentials(apiURL, token string) (string, string) {
+	if apiURL == "" {
+		apiURL = os.Getenv("DEPLOYDOCK_URL")
+	}
+	if token == "" {
+		token = os.Getenv("DEPLOYDOCK_TOKEN")
+	}
+	if apiURL == "" {
+		apiURL = "http://127.0.0.1:8000"
+	}
+	return apiURL, token
+}
