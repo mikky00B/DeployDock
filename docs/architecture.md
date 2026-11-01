@@ -75,7 +75,8 @@ App 1---* WebhookDelivery (audit of GitHub deliveries, by delivery id)
   auto-deploy flag, and health path; `EnvironmentVariable` rows are encrypted
   at rest and only ever read in masked form by the API; `Domain` rows track
   DNS verification status.
-- `Deployment` records status (the 12-value spec §13 pipeline), kind
+- `Deployment` records status (the spec §13 pipeline plus the v3 §4.3
+  `superseded` terminal state), kind
   (`deploy` / `rollback`), both commit SHAs, the commit message when
   webhook-triggered, exit code, timings, the health-check result, and who
   triggered it.

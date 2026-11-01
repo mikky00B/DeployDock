@@ -30,6 +30,9 @@ class DeploymentStatus(str, enum.Enum):
     failed = "failed"
     canceled = "canceled"
     rolled_back = "rolled_back"
+    # Terminal (v3 §4.3): a newer deployment replaced this queued one before it
+    # ran — stale code must not execute.
+    superseded = "superseded"
 
 
 # Canonical status groups. Kept next to the enum so the concurrency guard,
@@ -50,6 +53,7 @@ TERMINAL_DEPLOYMENT_STATUSES = (
     DeploymentStatus.failed,
     DeploymentStatus.canceled,
     DeploymentStatus.rolled_back,
+    DeploymentStatus.superseded,
 )
 
 # Active statuses that occupy the one-deployment-per-app slot proper. `queued`

@@ -10,7 +10,8 @@ export type DeploymentStatus =
   | "success"
   | "failed"
   | "canceled"
-  | "rolled_back";
+  | "rolled_back"
+  | "superseded";
 
 /** Statuses in which a deployment is still in flight and blocks a new one. */
 export const ACTIVE_DEPLOYMENT_STATUSES: readonly DeploymentStatus[] = [

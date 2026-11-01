@@ -391,5 +391,6 @@ function redeployHelperText(status: DeploymentStatus) {
   if (status === "failed") return "Fix the issue, then run deploy again.";
   if (status === "success") return "Run another deployment for this app.";
   if (status === "canceled") return "Run a fresh deployment for this app.";
+  if (status === "superseded") return "A newer deployment replaced this one before it ran.";
   return "A deployment is already in progress.";
 }

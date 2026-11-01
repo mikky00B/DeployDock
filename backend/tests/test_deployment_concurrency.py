@@ -198,3 +198,138 @@ async def test_orphan_sweep_unblocks_the_next_deployment(session_factory) -> Non
 
         session.add(make_deployment(app_record, DeploymentStatus.pending))
         await session.commit()  # must not raise
+
+
+async def test_creating_a_deployment_supersedes_the_queued_one(session_factory) -> None:
+    """v3 §4.3: stale code must not run — a deployment created while another is
+    queued marks the queued one superseded and takes the queue slot."""
+    from app.services.deployment_service import create_deployment
+
+    async with session_factory() as session:
+        app_record = await seed_app(session)
+        session.add(make_deployment(app_record, DeploymentStatus.success))  # for get_app_for_user owner
+        session.add(make_deployment(app_record, DeploymentStatus.queued))
+        await session.commit()
+
+        user = (await session.execute(select(User))).scalar_one()
+        replacement = await create_deployment(
+            session, app_id=app_record.id, current_user=user
+        )
+
+        assert replacement.status is DeploymentStatus.pending  # nothing dispatchable remains
+        old = (
+            await session.execute(
+                select(Deployment).where(Deployment.status == DeploymentStatus.superseded)
+            )
+        ).scalar_one()
+        assert old.status is DeploymentStatus.superseded
+        assert old.finished_at is not None
+
+
+async def test_supersede_queues_behind_a_running_deployment(session_factory) -> None:
+    """Superseding a queued row while a real deploy is running: the new one
+    waits behind the runner instead of starting immediately."""
+    from app.services.deployment_service import create_deployment
+
+    async with session_factory() as session:
+        app_record = await seed_app(session)
+        session.add(
+            make_deployment(
+                app_record, DeploymentStatus.running, created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            )
+        )
+        session.add(
+            make_deployment(
+                app_record, DeploymentStatus.queued, created_at=datetime(2026, 1, 2, tzinfo=UTC)
+            )
+        )
+        await session.commit()
+
+        user = (await session.execute(select(User))).scalar_one()
+        replacement = await create_deployment(
+            session, app_id=app_record.id, current_user=user, queue_if_active=True
+        )
+
+        assert replacement.status is DeploymentStatus.queued
+        superseded_count = len(
+            (
+                await session.execute(
+                    select(Deployment).where(Deployment.status == DeploymentStatus.superseded)
+                )
+            ).scalars().all()
+        )
+        assert superseded_count == 1
+
+
+async def test_superseded_rows_do_not_block_or_conflict(session_factory) -> None:
+    """A superseded row is terminal: the guard ignores it and two superseded
+    rows may coexist (a queue replaced twice in a row)."""
+    from app.services.deployment_service import create_deployment
+
+    async with session_factory() as session:
+        app_record = await seed_app(session)
+        user = (await session.execute(select(User))).scalar_one()
+
+        session.add(
+            make_deployment(
+                app_record, DeploymentStatus.running, created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            )
+        )
+        first_queued = make_deployment(
+            app_record, DeploymentStatus.queued, created_at=datetime(2026, 1, 2, tzinfo=UTC)
+        )
+        session.add(first_queued)
+        await session.commit()
+
+        first = await create_deployment(
+            session, app_id=app_record.id, current_user=user, queue_if_active=True
+        )
+        assert first.status is DeploymentStatus.queued
+
+        # A third push replaces the (now new) queued row again.
+        second = await create_deployment(
+            session, app_id=app_record.id, current_user=user, queue_if_active=True
+        )
+        assert second.status is DeploymentStatus.queued
+
+        statuses = (
+            await session.execute(select(Deployment.status).order_by(Deployment.created_at))
+        ).scalars().all()
+        assert statuses.count(DeploymentStatus.superseded) == 2
+
+
+async def test_interactive_deploy_is_refused_without_superseding(session_factory) -> None:
+    """A 409 must not mutate state: an interactive deploy facing a running
+    deployment (with a queued one behind it) refuses cleanly and leaves the
+    queued row untouched."""
+    import pytest as _pytest
+    from fastapi import HTTPException
+
+    from app.services.deployment_service import create_deployment
+
+    async with session_factory() as session:
+        app_record = await seed_app(session)
+        queued_row = make_deployment(
+            app_record, DeploymentStatus.queued, created_at=datetime(2026, 1, 2, tzinfo=UTC)
+        )
+        session.add(
+            make_deployment(
+                app_record, DeploymentStatus.running, created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            )
+        )
+        session.add(queued_row)
+        await session.commit()
+        queued_id = queued_row.id
+
+        user = (await session.execute(select(User))).scalar_one()
+        with _pytest.raises(HTTPException) as excinfo:
+            await create_deployment(session, app_id=app_record.id, current_user=user)
+        assert excinfo.value.status_code == 409
+
+        await session.rollback()
+        status_after = (
+            await session.execute(
+                select(Deployment.status).where(Deployment.id == queued_id)
+            )
+        ).scalar_one()
+        assert status_after is DeploymentStatus.queued

@@ -55,6 +55,11 @@ when the active one turns terminal — success, failure, cancellation, or
 rollback. Different apps deploy in parallel freely, including apps on the same
 server.
 
+A deployment created while another is already **queued** supersedes the older
+queued one (v3 §4.3): the old row goes terminal as `superseded` — stale code
+must not run — and the newer deployment takes the queue slot. The dashboard
+shows it as a neutral "superseded" badge.
+
 ## Cancel
 
 A non-terminal deployment can be canceled from the deployment page or via

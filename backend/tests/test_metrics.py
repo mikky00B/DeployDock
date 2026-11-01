@@ -61,5 +61,7 @@ def test_metrics_endpoint_renders_prometheus_text(metrics_client: TestClient) ->
     for status_value in (
         "queued", "cloning", "building", "testing", "deploying",
         "health_check", "running", "success", "failed", "canceled", "rolled_back",
+        "superseded",
     ):
         assert f'status="{status_value}"' in body
+

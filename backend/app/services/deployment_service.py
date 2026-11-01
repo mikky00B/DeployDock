@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 from app.models import Deployment, DeploymentLog, User
 from app.models.deployment import (
     ACTIVE_DEPLOYMENT_STATUSES,
+    DISPATCHABLE_DEPLOYMENT_STATUSES,
     TERMINAL_DEPLOYMENT_STATUSES,
     DeploymentKind,
     DeploymentStatus,
@@ -61,28 +62,60 @@ async def create_deployment(
 ) -> Deployment:
     """Create a deployment, optionally queueing behind an active one (spec §42).
 
-    Interactive deploys keep the strict 409 contract; automatic deploys
-    (GitHub webhooks) set ``queue_if_active`` so two quick pushes queue the
-    second instead of failing it. Queued deployments are promoted by
-    ``promote_next_queued_deployment`` when the active one turns terminal.
+    Interactive deploys keep the strict 409 contract against *running*
+    deployments; automatic deploys (GitHub webhooks) set ``queue_if_active``
+    so two quick pushes queue the second instead of failing it. Queued
+    deployments are promoted by ``promote_next_queued_deployment`` when the
+    active one turns terminal.
+
+    A deployment created while another is already **queued** supersedes the
+    older queued row (v3 §4.3): stale code must not run, so the newer
+    deployment takes the queue slot and the old one goes terminal.
     """
     app = await get_app_for_user(session, app_id=app_id, current_user=current_user)
     active = await get_active_deployment(session, app_id=app.id)
+    superseded: Deployment | None = None
     if active is not None:
-        if not queue_if_active:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"Deployment {active.id} is already {active.status.value} for this app. "
-                    "Wait for it to finish before starting another."
-                ),
-            )
-        if active.status is DeploymentStatus.queued:
-            # A queued deployment is itself active-only-one: never stack queued rows.
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="A deployment for this app is already queued. Wait for it to run.",
-            )
+        if active.status is not DeploymentStatus.queued:
+            if not queue_if_active:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Deployment {active.id} is already {active.status.value} for this app. "
+                        "Wait for it to finish before starting another."
+                    ),
+                )
+        else:
+            # A queued row exists: the new deployment replaces it (v3 §4.3 —
+            # stale code must not run). Anything still dispatchable keeps the
+            # slot, and an interactive caller facing a real deploy in flight
+            # is refused *before* any mutation is staged.
+            queued_row = active
+            active = await _get_dispatchable_deployment(session, app_id=app.id)
+            if active is not None and not queue_if_active:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Deployment {active.id} is already {active.status.value} for this app "
+                        f"and deployment {queued_row.id} is queued. Wait for them to finish."
+                    ),
+                )
+            superseded = queued_row
+
+    if superseded is not None:
+        superseded.status = DeploymentStatus.superseded
+        superseded.finished_at = datetime.now(UTC)
+        await create_audit_log(
+            session,
+            current_user=current_user,
+            action="deployment.superseded",
+            entity_type="deployment",
+            entity_id=superseded.id,
+            metadata={"app_id": str(app.id)},
+        )
+        # Anything still dispatchable keeps the slot: the new deployment
+        # queues behind it instead of starting immediately.
+        active = await _get_dispatchable_deployment(session, app_id=app.id)
     deployment = Deployment(
         owner_id=current_user.id,
         app_id=app.id,
@@ -113,8 +146,27 @@ async def create_deployment(
         metadata={"app_id": str(app.id), "kind": DeploymentKind.deploy.value},
     )
     await session.commit()
+    if superseded is not None:
+        deployment_event_bus.notify(superseded.id)
     await session.refresh(deployment)
     return deployment
+
+
+async def _get_dispatchable_deployment(
+    session: AsyncSession, *, app_id: uuid.UUID
+) -> Deployment | None:
+    """The app's in-flight deployment that occupies the dispatch slot, if any
+    (every active status except ``queued``)."""
+    result = await session.execute(
+        select(Deployment)
+        .where(
+            Deployment.app_id == app_id,
+            Deployment.status.in_(DISPATCHABLE_DEPLOYMENT_STATUSES),
+        )
+        .order_by(Deployment.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
 
 
 async def list_deployments_for_app(
