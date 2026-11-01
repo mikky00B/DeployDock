@@ -76,6 +76,7 @@ type AppSpec struct {
 	HealthcheckURL string            `json:"healthcheck_url"`
 	ContainerBase  string            `json:"container_base"`
 	Env            map[string]string `json:"env,omitempty"`
+	Domains        []string          `json:"domains,omitempty"`
 	CPULimit       *string           `json:"cpu_limit,omitempty"`
 	MemoryLimit    *string           `json:"memory_limit,omitempty"`
 }

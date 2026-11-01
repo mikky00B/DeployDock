@@ -35,6 +35,7 @@ from app.models.deployment import (
     DeploymentKind,
     DeploymentStatus,
 )
+from app.services.environment_service import verified_domains_for_app
 
 logger = logging.getLogger("deploydock.agent_dispatch")
 
@@ -48,8 +49,12 @@ def container_base_for(app_name: str) -> str:
     return f"deploydock-{slugify_container_base(app_name)}"
 
 
-def build_command_payload(app: App, deployment: Deployment) -> dict:
-    """Self-contained deployment spec sent to the agent."""
+def build_command_payload(app: App, deployment: Deployment, domains: list[str] | None = None) -> dict:
+    """Self-contained deployment spec sent to the agent.
+
+    ``domains`` are the app's DNS-verified hostnames — safe to persist (no
+    secrets here; environment variables are merged at claim time instead).
+    """
     return {
         "deployment_id": str(deployment.id),
         "kind": deployment.kind.value,
@@ -64,6 +69,7 @@ def build_command_payload(app: App, deployment: Deployment) -> dict:
             "container_base": container_base_for(app.name),
             "cpu_limit": app.cpu_limit,
             "memory_limit": app.memory_limit,
+            "domains": domains or [],
         },
     }
 
@@ -101,7 +107,11 @@ async def enqueue_deployment_command(
         kind=AgentCommandKind.rollback
         if deployment.kind is DeploymentKind.rollback
         else AgentCommandKind.deploy,
-        payload=build_command_payload(app, deployment),
+        payload=build_command_payload(
+            app,
+            deployment,
+            domains=await verified_domains_for_app(session, app_id=app.id),
+        ),
     )
     deployment_id = deployment.id
     session.add(command)

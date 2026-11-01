@@ -275,6 +275,25 @@ async def _on_health_check_failed(
     )
 
 
+async def _on_dockerfile_generated(
+    session: AsyncSession,
+    *,
+    deployment: Deployment,
+    event: dict,
+    allocate: Callable[[], int],
+) -> None:
+    """v3 §4.1: the agent generated a Dockerfile for a stack detected in the
+    workspace. Logged so the user sees exactly what was generated."""
+    stack = str(event.get("stack") or "unknown")
+    _add_log(
+        session,
+        deployment,
+        allocate,
+        DeploymentLogStream.system,
+        f"No Dockerfile in the workspace — generated one for the detected {stack} stack",
+    )
+
+
 async def _on_completed(
     session: AsyncSession,
     *,
@@ -413,6 +432,7 @@ _HANDLERS = {
     "log": _on_log,
     "health_check_passed": _on_health_check_passed,
     "health_check_failed": _on_health_check_failed,
+    "dockerfile_generated": _on_dockerfile_generated,
     "deployment_completed": _on_completed,
     "deployment_failed": _on_failed,
 }

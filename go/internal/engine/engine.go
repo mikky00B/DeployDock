@@ -41,8 +41,9 @@ type AppSpec struct {
 	HealthcheckURL string
 	ContainerBase  string
 	Env            map[string]string
-	CPULimit       string // e.g. "1.5"; empty = unlimited
-	MemoryLimit    string // e.g. "512m"; empty = unlimited
+	Domains        []string // verified hostnames for the proxy block
+	CPULimit       string   // e.g. "1.5"; empty = unlimited
+	MemoryLimit    string   // e.g. "512m"; empty = unlimited
 }
 
 // EventSink receives stage/log/health progress (spec §25 events).
@@ -107,6 +108,13 @@ type HealthChecker interface {
 	Check(ctx context.Context, url string) HealthCheckResult
 }
 
+// StackProvisioner generates a Dockerfile for workspaces without one (v3
+// §4.1). Nil disables generation; the build then fails on a missing
+// Dockerfile exactly as before.
+type StackProvisioner interface {
+	EnsureDockerfile(ctx context.Context, workspace string, port int) (stack string, generated bool, err error)
+}
+
 // ProxyManager abstracts nginx configuration (spec §35).
 type ProxyManager interface {
 	Configure(ctx context.Context, cfg ProxyConfig) error
@@ -131,6 +139,7 @@ type Engine struct {
 	Git     GitClient
 	Health  HealthChecker
 	Proxy   ProxyManager
+	Stacks  StackProvisioner
 	Sink    EventSink
 	Now     func() time.Time
 }
@@ -196,6 +205,16 @@ func (e *Engine) stageClone(ctx context.Context, s sink, req Request) (string, e
 
 func (e *Engine) stageBuild(ctx context.Context, s sink, req Request) (string, error) {
 	emitStage(s, StageBuild)
+	if e.Stacks != nil {
+		stack, generated, err := e.Stacks.EnsureDockerfile(ctx, req.App.AppPath, req.App.Port)
+		if err != nil {
+			return "", fmt.Errorf("dockerfile generation: %w", err)
+		}
+		if generated {
+			s.emit(map[string]any{"type": "dockerfile_generated", "stack": stack})
+			s.emit(map[string]any{"type": "log", "stream": "system", "line": fmt.Sprintf("no Dockerfile in the workspace — generated one for the detected %s stack", stack)})
+		}
+	}
 	imageRef := fmt.Sprintf("%s:%s", req.App.ContainerBase, imageTag(req))
 	if err := e.Runtime.Build(ctx, req.App.AppPath, imageRef); err != nil {
 		return "", fmt.Errorf("build image %s: %w", imageRef, err)
@@ -253,7 +272,11 @@ func (e *Engine) stageProxy(ctx context.Context, s sink, req Request, hostPort i
 	if e.Proxy == nil {
 		e.Proxy = NoopProxy{}
 	}
-	if err := e.Proxy.Configure(ctx, ProxyConfig{AppName: req.App.ContainerBase, Port: hostPort}); err != nil {
+	if err := e.Proxy.Configure(ctx, ProxyConfig{
+		AppName: req.App.ContainerBase,
+		Port:    hostPort,
+		Domains: req.App.Domains,
+	}); err != nil {
 		return fmt.Errorf("proxy: %w", err)
 	}
 	emitStageCompleted(s, StageProxy)

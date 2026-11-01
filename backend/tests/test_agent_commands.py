@@ -540,3 +540,70 @@ def test_claim_delivers_env_vars_but_never_stores_them(agent_deployment_client) 
     # The persisted payload (what a database dump would expose) has no secrets.
     assert "env" not in stored["app"]
     assert "secret-connection-string" not in str(stored)
+
+
+def test_command_payload_carries_verified_domains(agent_deployment_client) -> None:
+    """v3 §4.2: the agent proxy config needs the app's verified hostnames —
+    they ride in the (non-secret) stored command payload."""
+    from app.models import Domain, DomainStatus
+
+    client = agent_deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    server = create_server(client, headers)
+    registered = register_agent_for_server(client, headers, server)
+    app_record = create_app(client, headers, server)
+
+    environment = client.post(
+        f"/api/v1/apps/{app_record['id']}/environments",
+        json={"name": "production", "server_id": server["id"], "auto_deploy": True},
+        headers=headers,
+    ).json()
+
+    async def _seed_domain():
+        async with client.async_session() as session:
+            session.add(
+                Domain(
+                    environment_id=uuid.UUID(environment["id"]),
+                    hostname="app.example.com",
+                    status=DomainStatus.verified,
+                )
+            )
+            session.add(
+                Domain(
+                    environment_id=uuid.UUID(environment["id"]),
+                    hostname="pending.example.com",
+                    status=DomainStatus.pending,
+                )
+            )
+            await session.commit()
+
+    client.portal.start_task_soon(_seed_domain).result(timeout=10)
+
+    deploy_response = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers)
+    assert deploy_response.status_code == 202
+
+    commands = claim_command(client, registered)
+    assert commands[0]["payload"]["app"]["domains"] == ["app.example.com"]
+
+
+def test_dockerfile_generated_event_is_logged_for_the_user(agent_deployment_client) -> None:
+    """v3 §4.1: the user must see what the agent generated."""
+    client = agent_deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    server = create_server(client, headers)
+    registered = register_agent_for_server(client, headers, server)
+    app_record = create_app(client, headers, server)
+
+    deployment_id = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers).json()["id"]
+    assert claim_command(client, registered)
+
+    post_events(
+        client,
+        registered,
+        deployment_id,
+        [{"type": "dockerfile_generated", "stack": "node"}],
+    )
+
+    detail = read_deployment(client, headers, deployment_id)
+    lines = [log["line"] for log in detail["logs"]]
+    assert any("generated one for the detected node stack" in line for line in lines)

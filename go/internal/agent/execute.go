@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os/exec"
 
+	"github.com/deploydock/deploydock/go/internal/caddy"
 	"github.com/deploydock/deploydock/go/internal/client"
 	"github.com/deploydock/deploydock/go/internal/config"
 	"github.com/deploydock/deploydock/go/internal/docker"
@@ -15,6 +16,7 @@ import (
 	"github.com/deploydock/deploydock/go/internal/git"
 	"github.com/deploydock/deploydock/go/internal/health"
 	"github.com/deploydock/deploydock/go/internal/nginx"
+	"github.com/deploydock/deploydock/go/internal/stack"
 )
 
 // apiEventSink forwards engine events to the control plane. Event posting is
@@ -79,6 +81,7 @@ func executeCommand(ctx context.Context, log *slog.Logger, api *client.Client, s
 			HealthcheckURL: cmd.Payload.App.HealthcheckURL,
 			ContainerBase:  cmd.Payload.App.ContainerBase,
 			Env:            cmd.Payload.App.Env,
+			Domains:        cmd.Payload.App.Domains,
 			CPULimit:       derefString(cmd.Payload.App.CPULimit),
 			MemoryLimit:    derefString(cmd.Payload.App.MemoryLimit),
 		},
@@ -89,6 +92,7 @@ func executeCommand(ctx context.Context, log *slog.Logger, api *client.Client, s
 		Git:     &git.Client{},
 		Health:  &health.Checker{},
 		Proxy:   proxyManagerOrDefault(),
+		Stacks:  stack.Provisioner{},
 		Sink:    sink,
 	}
 
@@ -106,13 +110,17 @@ func executeCommand(ctx context.Context, log *slog.Logger, api *client.Client, s
 	return nil
 }
 
-// proxyManagerOrDefault returns a real nginx manager when the nginx binary is
-// present, otherwise a no-op so apps still deploy without a reverse proxy.
+// proxyManagerOrDefault picks the reverse-proxy manager for this host:
+// Caddy when present (automatic TLS), else nginx, else a no-op so apps still
+// deploy without a reverse proxy (v3 spec §4.2).
 func proxyManagerOrDefault() engine.ProxyManager {
-	if _, err := exec.LookPath("nginx"); err != nil {
-		return engine.NoopProxy{}
+	if _, err := exec.LookPath("caddy"); err == nil {
+		return &caddy.Manager{}
 	}
-	return &nginx.Manager{}
+	if _, err := exec.LookPath("nginx"); err == nil {
+		return &nginx.Manager{}
+	}
+	return engine.NoopProxy{}
 }
 
 func derefString(value *string) string {

@@ -197,6 +197,21 @@ async def merged_app_variables(
     return merged
 
 
+async def verified_domains_for_app(session: AsyncSession, *, app_id: uuid.UUID) -> list[str]:
+    """The app's DNS-verified hostnames, for proxy configuration on the VPS.
+
+    Delivered in the agent command payload so the proxy manager emits real
+    `server_name` entries (v3 §4.2) instead of a catch-all per app.
+    """
+    result = await session.execute(
+        select(Domain.hostname)
+        .join(Environment, Environment.id == Domain.environment_id)
+        .where(Environment.app_id == app_id, Domain.status == DomainStatus.verified)
+        .order_by(Domain.hostname.asc())
+    )
+    return list(result.scalars().all())
+
+
 async def add_domain(
     session: AsyncSession,
     *,

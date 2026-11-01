@@ -366,3 +366,97 @@ func TestPermanentRenameFailureKeepsLiveDeploymentAndWarns(t *testing.T) {
 		t.Errorf("renames = %v, want two attempts", runtime.renames)
 	}
 }
+
+type fakeStacks struct {
+	stack     string
+	generated bool
+	err       error
+	workspace string
+	port      int
+}
+
+func (f *fakeStacks) EnsureDockerfile(_ context.Context, workspace string, port int) (string, bool, error) {
+	f.workspace, f.port = workspace, port
+	return f.stack, f.generated, f.err
+}
+
+func TestGeneratedDockerfileIsLoggedBeforeBuild(t *testing.T) {
+	runtime := &fakeRuntime{hostPort: 40100}
+	stacks := &fakeStacks{stack: "node", generated: true}
+	sink := &recordingSink{}
+	eng := &Engine{
+		Runtime: runtime,
+		Git:     &fakeGit{commit: "abc"},
+		Health:  &fakeHealth{result: HealthCheckResult{Passed: true, StatusCode: 200, Attempts: 1}},
+		Proxy:   NoopProxy{},
+		Stacks:  stacks,
+		Sink:    sink,
+	}
+	if err := eng.Execute(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// The generation call carried the workspace and the app port for the
+	// template, and both the dedicated event and a log line preceded build.
+	if stacks.workspace != "/opt/watchdog" || stacks.port != 8080 {
+		t.Errorf("EnsureDockerfile(workspace=%q, port=%d)", stacks.workspace, stacks.port)
+	}
+	events := sink.types()
+	generatedAt, buildStartedAt, buildCompletedAt := -1, -1, -1
+	for i, eventType := range events {
+		switch eventType {
+		case "dockerfile_generated":
+			generatedAt = i
+		case "stage_started":
+			if sink.events[i]["stage"] == StageBuild && buildStartedAt == -1 {
+				buildStartedAt = i
+			}
+		case "stage_completed":
+			if sink.events[i]["stage"] == StageBuild {
+				buildCompletedAt = i
+			}
+		}
+	}
+	// Generation happens within the build stage, before the image is built.
+	if generatedAt < 0 || buildStartedAt < 0 || buildCompletedAt < 0 ||
+		generatedAt < buildStartedAt || generatedAt > buildCompletedAt {
+		t.Fatalf("dockerfile_generated must land inside the build stage: %v", events)
+	}
+	for _, event := range sink.events {
+		if event["type"] == "dockerfile_generated" && event["stack"] != "node" {
+			t.Errorf("dockerfile_generated stack = %v", event["stack"])
+		}
+	}
+}
+
+func TestProxyStageReceivesVerifiedDomains(t *testing.T) {
+	recordingProxy := &recordingProxy{}
+	eng := &Engine{
+		Runtime: &fakeRuntime{hostPort: 40101},
+		Git:     &fakeGit{commit: "abc"},
+		Health:  &fakeHealth{result: HealthCheckResult{Passed: true, StatusCode: 200, Attempts: 1}},
+		Proxy:   recordingProxy,
+		Sink:    &recordingSink{},
+	}
+	req := testRequest()
+	req.App.Domains = []string{"app.example.com", "www.example.com"}
+	if err := eng.Execute(context.Background(), req); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if len(recordingProxy.configs) != 1 {
+		t.Fatalf("Configure calls = %d", len(recordingProxy.configs))
+	}
+	got := recordingProxy.configs[0]
+	if len(got.Domains) != 2 || got.Domains[0] != "app.example.com" || got.Domains[1] != "www.example.com" {
+		t.Errorf("ProxyConfig.Domains = %v", got.Domains)
+	}
+}
+
+type recordingProxy struct {
+	configs []ProxyConfig
+}
+
+func (r *recordingProxy) Configure(_ context.Context, cfg ProxyConfig) error {
+	r.configs = append(r.configs, cfg)
+	return nil
+}
