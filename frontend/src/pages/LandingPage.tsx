@@ -1,30 +1,55 @@
 import { useEffect, useRef, useState } from "react";
 
 import { copyToClipboard } from "../components/common";
+import { useAuth } from "../hooks/useAuth";
 import { navigateTo } from "../routes";
 
-const LOG_LINES: Array<[string, string, string]> = [
-  ["17:04:02", "info", "fetching 4e0c4d3 from origin/main"],
-  ["17:04:03", "ok", "✓ 214 files changed · 8.2 KiB"],
-  ["17:04:04", "info", "pnpm install --frozen-lockfile"],
-  ["17:04:16", "ok", "✓ 812 packages · 12.4s"],
-  ["17:04:17", "info", "pnpm build"],
-  ["17:04:22", "info", "compiling next · optimizing…"],
-  ["17:04:54", "ok", "✓ build succeeded · 38.1s"],
-  ["17:04:55", "info", "writing systemd unit web.service"],
-  ["17:04:56", "info", "reloading daemon · restarting web"],
-  ["17:04:57", "ok", "✓ service up · pid 24118"],
-  ["17:04:58", "info", "health check GET /_health"],
-  ["17:04:59", "ok", "✓ 200 OK · 41ms"],
-  ["17:05:00", "ok", "✓ deploy e0c4d3 · promoted to live"],
-  ["17:05:02", "info", "draining previous release · gracefully"],
-  ["17:05:04", "warn", "note: postgres pool restarted (2 conns)"],
-  ["17:05:06", "ok", "✓ web is live · 54.2s total"],
+// Deploy-run log, as second offsets from the start of a run. The hero log
+// loops forever; each replay advances the clock so it reads as a new run
+// instead of the same lines repeating.
+const LOG_LINES: Array<[number, string, string]> = [
+  [2, "info", "fetching 4e0c4d3 from origin/main"],
+  [3, "ok", "✓ 214 files changed · 8.2 KiB"],
+  [4, "info", "pnpm install --frozen-lockfile"],
+  [16, "ok", "✓ 812 packages · 12.4s"],
+  [17, "info", "pnpm build"],
+  [22, "info", "compiling next · optimizing…"],
+  [54, "ok", "✓ build succeeded · 38.1s"],
+  [55, "info", "writing systemd unit web.service"],
+  [56, "info", "reloading daemon · restarting web"],
+  [57, "ok", "✓ service up · pid 24118"],
+  [58, "info", "health check GET /_health"],
+  [59, "ok", "✓ 200 OK · 41ms"],
+  [60, "ok", "✓ deploy e0c4d3 · promoted to live"],
+  [62, "info", "draining previous release · gracefully"],
+  [64, "warn", "note: postgres pool restarted (2 conns)"],
+  [66, "ok", "✓ web is live · 54.2s total"],
 ];
 
+const LOG_RUN_START = 17 * 3600 + 4 * 60; // first run's clock: 17:04:00
+const LOG_CYCLE_SECONDS = 120; // head-start each replayed run gets
+
+function formatLogTime(totalSeconds: number) {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const h = Math.floor(totalSeconds / 3600) % 24;
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
+type HeroLogLine = [time: string, level: string, message: string];
+
+const LOG_SEED_COUNT = 8; // lines shown before the interval starts appending
+
 function useHeroLog() {
-  const [lines, setLines] = useState<Array<[string, string, string]>>(() => LOG_LINES.slice(0, 8));
-  const indexRef = useRef(0);
+  const stamp = (run: number, offset: number) =>
+    formatLogTime(LOG_RUN_START + run * LOG_CYCLE_SECONDS + offset);
+
+  const [lines, setLines] = useState<HeroLogLine[]>(() =>
+    LOG_LINES.slice(0, LOG_SEED_COUNT).map(([offset, lvl, msg]) => [stamp(0, offset), lvl, msg]),
+  );
+  // Resume after the seed, or the first appended line would repeat line 0.
+  const indexRef = useRef(LOG_SEED_COUNT);
   const reduced = useRef(
     typeof window !== "undefined" &&
       window.matchMedia &&
@@ -35,9 +60,12 @@ function useHeroLog() {
     if (reduced.current) return;
     const id = setInterval(() => {
       const i = indexRef.current % LOG_LINES.length;
+      const run = Math.floor(indexRef.current / LOG_LINES.length);
       indexRef.current += 1;
       setLines((prev) => {
-        const next = [...prev, LOG_LINES[i]];
+        const [offset, lvl, msg] = LOG_LINES[i];
+        const entry: HeroLogLine = [stamp(run, offset), lvl, msg];
+        const next = [...prev, entry];
         return next.length > 14 ? next.slice(next.length - 14) : next;
       });
     }, 1400);
@@ -168,7 +196,7 @@ const FAQ_ITEMS: Array<[string, string]> = [
   ],
   [
     "How does rollback work?",
-    "Rollback re-deploys the last successful release as a new deployment. With the agent, it checks out the previous commit, rebuilds the container, and switches traffic only after the new container passes its health check — the old one keeps serving until then.",
+    "Rollback re-runs your deploy at the last successful commit as a new deployment. Docker apps rebuild the container and switch traffic only after the replacement passes its health check; systemd apps rebuild and restart the unit. Database migrations are never rolled back automatically.",
   ],
   [
     "Is it really free?",
@@ -233,6 +261,7 @@ const GITHUB_URL = "https://github.com/mikky00B/DeployDock";
 const INSTALL_COMMAND = `curl -fsSL https://raw.githubusercontent.com/mikky00B/DeployDock/master/install.sh | bash`;
 
 export function LandingPage() {
+  const { user } = useAuth();
   const logLines = useHeroLog();
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
@@ -266,9 +295,29 @@ export function LandingPage() {
               <GitHubIcon />
               <span>GitHub</span>
             </a>
-            <a className="btn btn-primary btn-sm" href="/login" onClick={(event) => { event.preventDefault(); navigateTo("/login"); }}>
-              Sign in
-            </a>
+            {user ? (
+              <a
+                className="btn btn-primary btn-sm"
+                href="/dashboard"
+                onClick={(event) => {
+                  event.preventDefault();
+                  navigateTo("/dashboard");
+                }}
+              >
+                Open panel
+              </a>
+            ) : (
+              <a
+                className="btn btn-primary btn-sm"
+                href="/docs"
+                onClick={(event) => {
+                  event.preventDefault();
+                  navigateTo("/docs");
+                }}
+              >
+                Install
+              </a>
+            )}
           </div>
         </div>
       </nav>
@@ -278,7 +327,7 @@ export function LandingPage() {
         <div className="wrap hero-grid">
           <div>
             <span className="eyebrow">
-              <span className="dot" /> v2 · open source
+              <span className="dot" /> v2 preview · open source
             </span>
             <h1 className="headline">
               Deploy to your <em>own servers</em>. Without the yak-shaving.
@@ -397,24 +446,26 @@ export function LandingPage() {
               <div className="step-num">STEP 01</div>
               <h3 className="step-title">Connect your server</h3>
               <p className="step-body">
-                Point DeployDock at any VPS over SSH. It installs a lightweight agent — no daemon, no vendor lock-in,
-                no reformatting.
+                Add the server in the dashboard, then run a tiny outbound-only agent binary on the VPS — no open ports,
+                no vendor lock-in, no reformatting.
               </p>
               <div className="step-visual">
-                <span className="comment"># from the dashboard or CLI</span>
+                <span className="comment"># add the server in the dashboard, then on the VPS:</span>
                 <br />
-                <span className="kw">deploydock</span> project create{" "}
-                <span style={{ color: "var(--fg)" }}>--name watchdog</span>
+                <span className="kw">sudo</span> ./deploydock-agent register \
                 <br />
-                <span className="comment"># then install the agent on the VPS</span>
+                {"  "}<span className="kw">--server</span> <span style={{ color: "var(--fg)" }}>https://dock.example.com</span>{" "}
+                <span className="kw">--token</span> dck_rt_…
+                <br />
+                <span className="kw">sudo</span> ./deploydock-agent run
               </div>
             </div>
             <div className="step">
               <div className="step-num">STEP 02</div>
               <h3 className="step-title">Register your app</h3>
               <p className="step-body">
-                Point it at a Git repo, set a build &amp; start command, pick a target server. DeployDock generates
-                the systemd unit for you.
+                Point it at a Git repo, set a build &amp; start command or a Dockerfile, and pick a target server.
+                DeployDock runs it under systemd or Docker — whatever the app already uses.
               </p>
               <div className="step-visual">
                 repo: <span style={{ color: "var(--fg)" }}>github.com/you/web</span>
@@ -591,7 +642,8 @@ export function LandingPage() {
               <h2>Free. Open source. Yours.</h2>
               <p>
                 Runs on the same hardware you&apos;re already paying for. No seat pricing, no build-minute pricing, no
-                vendor account holding your infrastructure hostage.
+                vendor account holding your infrastructure hostage. Give your whole team one shared panel — every
+                deploy, restart, and rollback recorded in an audit trail — instead of sharing root SSH keys.
               </p>
               <div style={{ marginTop: 28, display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <a className="btn btn-primary" href="/docs" onClick={(event) => { event.preventDefault(); navigateTo("/docs"); }}>
@@ -628,7 +680,7 @@ export function LandingPage() {
       <section className="final-cta">
         <div className="wrap">
           <h2>Own your deploys.</h2>
-          <p>Install DeployDock on any VPS in under 60 seconds. Bring your servers; keep your workflow.</p>
+          <p>Install DeployDock on any VPS with one command. Bring your servers; keep your workflow.</p>
           <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
             <a className="btn btn-primary" href="/docs" onClick={(event) => { event.preventDefault(); navigateTo("/docs"); }}>
               Install DeployDock
@@ -675,7 +727,7 @@ export function LandingPage() {
         </div>
         <div className="wrap footer-bottom">
           <div>© 2026 DeployDock · MIT License</div>
-          <div>v2.0.0-dev · self-hosted</div>
+          <div>v2 preview · self-hosted</div>
         </div>
       </footer>
     </div>

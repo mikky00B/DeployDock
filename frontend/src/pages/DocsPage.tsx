@@ -95,6 +95,42 @@ deploy ALL=(root) NOPASSWD: /usr/sbin/nginx -t`}</code>
         </section>
       </section>
 
+      <section className="docs-section" aria-labelledby="panel-install-title">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Install</p>
+            <h2 id="panel-install-title">One command brings up the whole panel</h2>
+          </div>
+        </div>
+        <p className="form-helper" style={{ maxWidth: 720, marginBottom: 22 }}>
+          The installer checks for Docker and Compose, writes <code className="inline-code">backend/.env</code> with
+          generated secrets (never overwriting an existing one), and starts PostgreSQL, Redis, the API, and the web
+          panel. When it finishes, open <code className="inline-code">http://your-server:5173</code> and create an
+          account.
+        </p>
+        <div className="docs-command-grid">
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Quickstart</h3>
+            </div>
+            <pre className="command-snippet">
+              <code>{`curl -fsSL https://raw.githubusercontent.com/mikky00B/DeployDock/master/install.sh | bash`}</code>
+            </pre>
+          </article>
+          <article className="plan-section">
+            <div className="plan-section-heading">
+              <h3>Prefer to run it by hand?</h3>
+            </div>
+            <pre className="command-snippet">
+              <code>{`git clone https://github.com/mikky00B/DeployDock.git
+cd DeployDock
+cp backend/.env.example backend/.env   # then set real values
+docker compose up -d --build`}</code>
+            </pre>
+          </article>
+        </div>
+      </section>
+
       <section className="docs-section" aria-labelledby="command-patterns-title">
         <div className="section-heading">
           <div>
