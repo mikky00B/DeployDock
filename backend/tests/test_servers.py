@@ -91,6 +91,13 @@ async def server_client(monkeypatch):
     await engine.dispose()
 
 
+
+
+def pin_host_key_for(client: TestClient, headers: dict[str, str], server_id: str) -> None:
+    """The M12 onboarding contract as a helper: pin, then test."""
+    pinned = client.post(f"/api/v1/servers/{server_id}/host-key", headers=headers)
+    assert pinned.status_code == 200
+
 def auth_headers(client: TestClient, email: str) -> dict[str, str]:
     register_response = client.post(
         "/api/v1/auth/register",
@@ -232,6 +239,7 @@ def test_connection_test_uses_decrypted_key_and_marks_connected(server_client) -
     created = client.post("/api/v1/servers", json=server_payload(), headers=headers).json()
     ssh_service = SuccessfulSSHService()
     app.dependency_overrides[get_ssh_service] = lambda: ssh_service
+    pin_host_key_for(client, headers, created["id"])
 
     response = client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
 
@@ -258,6 +266,7 @@ def test_connection_test_marks_unreachable_on_ssh_failure(server_client) -> None
     headers = auth_headers(client, "owner@example.com")
     created = client.post("/api/v1/servers", json=server_payload(), headers=headers).json()
     app.dependency_overrides[get_ssh_service] = lambda: FailingSSHService()
+    pin_host_key_for(client, headers, created["id"])
 
     response = client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
 
@@ -291,7 +300,10 @@ class UnreachableHostKeySSHService:
         raise AssertionError("run_command must not be called when the host key scan fails")
 
 
-async def test_connection_test_pins_the_host_key_on_first_use(server_client) -> None:
+async def test_connection_test_does_not_pin_on_first_use(server_client) -> None:
+    """Audit M12: the first test-connection scans and surfaces the host key
+    fingerprint but pins nothing — first contact is exactly when an on-path
+    attacker can present their own key. Pinning is an explicit, separate call."""
     client, async_session = server_client
     headers = auth_headers(client, "owner@example.com")
     created = client.post("/api/v1/servers", json=server_payload(), headers=headers).json()
@@ -301,13 +313,54 @@ async def test_connection_test_pins_the_host_key_on_first_use(server_client) -> 
     response = client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
 
     assert response.status_code == 200
-    assert response.json()["host_key_fingerprint"] == TEST_HOST_KEY.fingerprint
+    body = response.json()
+    assert body["success"] is False
+    assert body["host_key_fingerprint"] == TEST_HOST_KEY.fingerprint
+    assert "not trusted yet" in body["message"]
 
     async with async_session() as session:
         stored = (await session.execute(select(Server))).scalar_one()
 
+    assert stored.known_host_key is None
+    assert stored.known_host_key_pinned_at is None
+
+
+async def test_scan_returns_the_fingerprint_without_pinning(server_client) -> None:
+    client, async_session = server_client
+    headers = auth_headers(client, "owner@example.com")
+    created = client.post("/api/v1/servers", json=server_payload(), headers=headers).json()
+
+    app.dependency_overrides[get_ssh_service] = lambda: SuccessfulSSHService()
+    response = client.post(f"/api/v1/servers/{created['id']}/host-key/scan", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["fingerprint"] == TEST_HOST_KEY.fingerprint
+
+    async with async_session() as session:
+        stored = (await session.execute(select(Server))).scalar_one()
+    assert stored.known_host_key is None
+
+
+async def test_explicit_pin_then_connection_test_succeeds(server_client) -> None:
+    """The onboarding contract: scan → operator verifies → pin → test."""
+    client, async_session = server_client
+    headers = auth_headers(client, "owner@example.com")
+    created = client.post("/api/v1/servers", json=server_payload(), headers=headers).json()
+
+    app.dependency_overrides[get_ssh_service] = lambda: SuccessfulSSHService()
+    scanned = client.post(f"/api/v1/servers/{created['id']}/host-key/scan", headers=headers)
+    assert scanned.json()["fingerprint"] == TEST_HOST_KEY.fingerprint
+
+    pinned = client.post(f"/api/v1/servers/{created['id']}/host-key", headers=headers)
+    assert pinned.status_code == 200
+    assert pinned.json()["fingerprint"] == TEST_HOST_KEY.fingerprint
+
+    tested = client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
+    assert tested.json()["success"] is True
+
+    async with async_session() as session:
+        stored = (await session.execute(select(Server))).scalar_one()
     assert stored.known_host_key == TEST_HOST_KEY.stored_value
-    assert stored.known_host_key_pinned_at is not None
 
 
 async def test_connection_test_passes_the_pinned_key_to_the_ssh_layer(server_client) -> None:
@@ -317,6 +370,7 @@ async def test_connection_test_passes_the_pinned_key_to_the_ssh_layer(server_cli
     ssh_service = SuccessfulSSHService()
     app.dependency_overrides[get_ssh_service] = lambda: ssh_service
 
+    pin_host_key_for(client, headers, created["id"])
     client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
     client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
 
@@ -344,6 +398,7 @@ async def test_repin_host_key_replaces_the_pin_and_reports_the_previous_one(serv
     created = client.post("/api/v1/servers", json=server_payload(), headers=headers).json()
 
     app.dependency_overrides[get_ssh_service] = lambda: SuccessfulSSHService()
+    pin_host_key_for(client, headers, created["id"])
     client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
 
     app.dependency_overrides[get_ssh_service] = lambda: RotatedHostKeySSHService()
@@ -408,6 +463,7 @@ async def test_changing_the_host_clears_the_pinned_key(server_client) -> None:
     headers = auth_headers(client, "owner@example.com")
     created = client.post("/api/v1/servers", json=server_payload(), headers=headers).json()
     app.dependency_overrides[get_ssh_service] = lambda: SuccessfulSSHService()
+    pin_host_key_for(client, headers, created["id"])
     client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
 
     response = client.patch(
@@ -431,6 +487,7 @@ async def test_renaming_a_server_keeps_the_pinned_key(server_client) -> None:
     headers = auth_headers(client, "owner@example.com")
     created = client.post("/api/v1/servers", json=server_payload(), headers=headers).json()
     app.dependency_overrides[get_ssh_service] = lambda: SuccessfulSSHService()
+    pin_host_key_for(client, headers, created["id"])
     client.post(f"/api/v1/servers/{created['id']}/test-connection", headers=headers)
 
     response = client.patch(

@@ -100,7 +100,7 @@ async def test_connection(
     ssh_service: Annotated[SSHService, Depends(get_ssh_service)],
 ) -> ServerConnectionTestRead:
     server = await get_server_for_user(session, server_id=server_id, current_user=current_user)
-    success, message = await test_server_connection(
+    success, message, scanned = await test_server_connection(
         session,
         server=server,
         current_user=current_user,
@@ -111,7 +111,42 @@ async def test_connection(
         success=success,
         status=server.status,
         message=message,
-        host_key_fingerprint=server.known_host_key_fingerprint,
+        # The scanned (untrusted) fingerprint when unpinned — the UI shows it
+        # for the operator's out-of-band verification (audit M12).
+        host_key_fingerprint=scanned.fingerprint if scanned else server.known_host_key_fingerprint,
+    )
+
+
+@router.post("/{server_id}/host-key/scan", response_model=ServerHostKeyRead)
+async def scan_host_key(
+    server_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    ssh_service: Annotated[SSHService, Depends(get_ssh_service)],
+) -> ServerHostKeyRead:
+    """Read the server's current host key WITHOUT pinning it (audit M12).
+
+    Onboarding step one: the operator compares this fingerprint against the
+    server itself before anything is trusted. Pinning is a separate, explicit
+    call to POST /servers/{id}/host-key.
+    """
+    server = await get_server_for_user(session, server_id=server_id, current_user=current_user)
+    try:
+        host_key = await ssh_service.scan_host_key(host=server.host, port=server.port)
+    except Exception:
+        logger.exception("Could not read host key from %s:%s", server.host, server.port)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"Could not read a host key from {server.host}:{server.port}. Check that "
+                "the server is reachable and SSH is running, then try again."
+            ),
+        ) from None
+    return ServerHostKeyRead(
+        fingerprint=host_key.fingerprint,
+        algorithm=host_key.algorithm,
+        previous_fingerprint=server.known_host_key_fingerprint,
+        message="Host key scanned — nothing is trusted yet. Verify this fingerprint on the server.",
     )
 
 

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.secrets import decrypt_secret, encrypt_secret
-from app.models import Server, User
+from app.models import Agent, AgentReportedStatus, Server, User
 from app.models.server import ServerAuthType, ServerStatus
 from app.schemas.server import ServerCreate, ServerUpdate
 from app.services.audit_service import create_audit_log
@@ -126,6 +126,16 @@ async def update_server(
 
 
 async def delete_server(session: AsyncSession, *, server: Server) -> None:
+    # Audit L2: the FK would only null the agents' server_id, leaving active
+    # agent rows with valid tokens for a server that no longer exists. Retire
+    # them explicitly so nothing dead can keep authenticating.
+    result = await session.execute(
+        select(Agent).where(Agent.server_id == server.id, Agent.revoked_at.is_(None))
+    )
+    now = datetime.now(UTC)
+    for agent in result.scalars():
+        agent.revoked_at = now
+        agent.reported_status = AgentReportedStatus.retired
     await session.delete(server)
     await session.commit()
 
@@ -137,20 +147,43 @@ async def test_server_connection(
     current_user: User,
     settings: Settings,
     ssh_service: SSHService,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, HostKeyInfo | None]:
+    """Test the connection. The third element is the scanned host key when the
+    server is unpinned (audit M12): the operator must confirm that fingerprint
+    out-of-band before anything is pinned — first contact is exactly when an
+    on-path attacker can present their own key.
+    """
+    scanned_host_key: HostKeyInfo | None = None
     if server.known_host_key is None:
-        # Trust on first use: pin whatever the server presents now, and surface the
-        # fingerprint so the operator can compare it against the host itself.
         try:
             host_key = await ssh_service.scan_host_key(host=server.host, port=server.port)
         except Exception as exc:
-            return await _record_connection_failure(
+            failed, message = await _record_connection_failure(
                 session,
                 server=server,
                 current_user=current_user,
                 message=f"Could not read host key from {server.host}:{server.port}: {exc}",
             )
-        pin_host_key(server, host_key)
+            return failed, message, None
+        scanned_host_key = host_key
+        message = (
+            f"Host key scanned but not trusted yet. Verify this fingerprint on the server "
+            f"(ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub), then pin it: "
+            f"{host_key.fingerprint} ({host_key.algorithm})"
+        )
+        server.status = ServerStatus.unknown
+        server.last_connection_error = message
+        server.last_connection_check_at = datetime.now(UTC)
+        await create_audit_log(
+            session,
+            current_user=current_user,
+            action="server.connection_tested",
+            entity_type="server",
+            entity_id=server.id,
+            metadata={"result": "host_key_unpinned"},
+        )
+        await session.commit()
+        return (False, message, scanned_host_key)
 
     private_key = decrypt_secret(server.encrypted_private_key, settings)
 
@@ -164,19 +197,21 @@ async def test_server_connection(
             known_host_key=server.known_host_key,
         )
     except (HostKeyMismatchError, HostKeyUnpinnedError) as exc:
-        return await _record_connection_failure(
+        failed, message = await _record_connection_failure(
             session,
             server=server,
             current_user=current_user,
             message=str(exc),
         )
+        return failed, message, None
     except Exception as exc:
-        return await _record_connection_failure(
+        failed, message = await _record_connection_failure(
             session,
             server=server,
             current_user=current_user,
             message=f"SSH connection failed: {exc}",
         )
+        return failed, message, None
 
     success = result.exit_code == 0 and "deploydock-ok" in result.stdout
     server.status = ServerStatus.connected if success else ServerStatus.unreachable
@@ -194,8 +229,8 @@ async def test_server_connection(
     await session.refresh(server)
 
     if success:
-        return True, "SSH connection succeeded"
-    return False, server.last_connection_error or "SSH connection failed"
+        return True, "SSH connection succeeded", None
+    return False, server.last_connection_error or "SSH connection failed", None
 
 
 def fingerprint_private_key(private_key: str) -> str:
