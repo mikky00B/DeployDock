@@ -1,7 +1,11 @@
 # Competitive & AI-Trend Research — InstaCloud, Aeroplane, and the 2026 Agent Wave
 
 **Date:** October 2026
-**Scope:** Deep-dive on two reference projects ([InstaCloud](https://www.instacloud.com/), [Aeroplane](https://aeroplane.run/)), the 2026 AI-agentic trend line, and what DeployDock should learn from each. Findings are mapped to our existing roadmap (see `SPEC_PROGRESS.md`) rather than replacing it.
+**Scope:** Deep-dive on two reference projects ([InstaCloud](https://www.instacloud.com/), [Aeroplane](https://aeroplane.run/)), the 2026 AI-agentic trend line, and what DeployDock should learn from each.
+
+This note is background, not the roadmap. The comparison table describes
+DeployDock as of October 2026, before v3.1 and v3.2 landed. Open work is
+`DeployDock_Spec.md`. Finished work is `DeployDock_Archive_Spec.md`.
 
 ---
 
@@ -118,7 +122,9 @@ Compute is metered per second ($0.00000772/vCPU-sec, $0.00000386/GB-sec, $0.05/G
 
 ## 6. What DeployDock should do — prioritized recommendations
 
-Mapped to our existing phases in `SPEC_PROGRESS.md`. Items marked ★ are new scope this research adds.
+Mapped, in October 2026, onto the old phase tracker. v3.1 and v3.2 have since
+shipped (see `DeployDock_Archive_Spec.md`). What is still open from the
+strategic table is `DeployDock_Spec.md` §2 and §3.
 
 ### Quick wins (days, high leverage)
 

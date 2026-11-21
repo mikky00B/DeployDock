@@ -25,9 +25,13 @@ Thumbs.db
 
 # Local working docs (not for the repo)
 SPEC_PROGRESS.md
-v3_spec_progress.md
-DeployDock_v2_Master_Spec.md
-DeployDock_v3_Master_Spec.md
+SPEC_PROGRESS_ARCHIVE.md
+DeployDock_Spec.md
+DeployDock_Archive_Spec.md
+
+# Internal audits and system-design notes (personal working docs)
+docs/audits/
+docs/system-design/
 
 # Local design handoff assets
 design_handoff_deploydock_landing/
