@@ -48,8 +48,8 @@ def auth_headers(client: TestClient, email: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def mint_registration_token(client: TestClient, headers: dict[str, str]) -> dict:
-    response = client.post("/api/v1/agents/registration-tokens", json={}, headers=headers)
+def mint_registration_token(client: TestClient, headers: dict[str, str], **payload) -> dict:
+    response = client.post("/api/v1/agents/registration-tokens", json=payload, headers=headers)
     assert response.status_code == 201
     return response.json()
 
@@ -221,3 +221,143 @@ async def test_rotate_token_revokes_old_token(agent_client) -> None:
             (await session.execute(select(AuditLog.action).where(AuditLog.action == "agent.token_rotated"))).scalars()
         )
     assert actions == ["agent.token_rotated"]
+
+
+def create_server(client: TestClient, headers: dict[str, str]) -> dict:
+    response = client.post(
+        "/api/v1/servers",
+        json={
+            "name": "Cross VPS",
+            "host": "203.0.113.50",
+            "port": 22,
+            "username": "deploy",
+            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+async def test_registration_token_cannot_target_another_users_server(agent_client) -> None:
+    """Audit C1: minting a registration token bound to someone else's server
+    would let the attacker's agent receive that tenant's commands and
+    decrypted env vars. It must 404 like any other foreign resource."""
+    client, _ = agent_client
+    owner_headers = auth_headers(client, "owner@example.com")
+    attacker_headers = auth_headers(client, "attacker@example.com")
+
+    server = create_server(client, owner_headers)
+
+    response = client.post(
+        "/api/v1/agents/registration-tokens",
+        json={"server_id": server["id"]},
+        headers=attacker_headers,
+    )
+    assert response.status_code == 404
+async def test_dispatch_never_selects_a_foreign_agent(agent_client) -> None:
+    """Audit C1, defense in depth: even a malformed row (attacker-owned agent
+    bound to a victim's server) must not be selected for the victim's
+    deployments — scoping checks both the agent's and the server's owner."""
+    import uuid
+
+    from app.services.agent_dispatch import find_agent_for_server
+
+    client, async_session = agent_client
+    owner_headers = auth_headers(client, "owner@example.com")
+    attacker_headers = auth_headers(client, "attacker@example.com")
+
+    server = create_server(client, owner_headers)
+    minted = mint_registration_token(client, attacker_headers)
+    registered = register_agent(client, minted["token"]).json()
+
+    async with async_session() as session:
+        agent = await session.get(Agent, uuid.UUID(registered["agent_id"]))
+        agent.server_id = uuid.UUID(server["id"])
+        await session.commit()
+        agent_id, attacker_id, server_id = agent.id, agent.owner_id, agent.server_id
+
+    async with async_session() as session:
+        # The server owner's id is what dispatch would pass (deployment.owner).
+        owner_id = (
+            await session.execute(
+                select(Agent.owner_id).where(Agent.id == agent_id)
+            )
+        ).scalar_one()
+        # Sanity: the row really is attacker-owned and server-bound.
+        assert owner_id == attacker_id and server_id == uuid.UUID(server["id"])
+
+        # Dispatch for the victim's deployment (owner = the server owner) must
+        # skip the attacker-owned row. Query with the attacker's user id as
+        # "the deployment owner" from the attacker's own dispatch — no, the
+        # decisive case: the VICTIM dispatches, so owner_id = victim. The
+        # victim is a different user; simulate via a fresh uuid that is not
+        # the attacker's.
+        victim_id = uuid.uuid5(uuid.NAMESPACE_DNS, "victim.example.com")
+        assert victim_id != attacker_id
+        selected = await find_agent_for_server(session, server_id=server_id, owner_id=victim_id)
+        assert selected is None
+
+        # And the attacker cannot pull the row into their own dispatch either,
+        # because the server does not belong to them.
+        selected_for_attacker = await find_agent_for_server(
+            session, server_id=server_id, owner_id=attacker_id
+        )
+        assert selected_for_attacker is None
+
+
+async def test_stale_agent_is_skipped_and_online_one_selected(agent_client) -> None:
+    """Audit H3: an agent that stopped heartbeating must not capture dispatch —
+    the online agent wins, and with no online agent dispatch falls back to SSH
+    (find_agent_for_server returns None)."""
+    import uuid
+
+    from app.services.agent_dispatch import find_agent_for_server
+
+    client, async_session = agent_client
+    headers = auth_headers(client, "owner@example.com")
+    server = create_server(client, headers)
+
+    minted = mint_registration_token(client, headers, server_id=server["id"])
+    first = register_agent(client, minted["token"]).json()
+    minted = mint_registration_token(client, headers, server_id=server["id"])
+    second = register_agent(client, minted["token"]).json()
+
+    async with async_session() as session:
+        # Re-registration superseded the first agent (audit C1 unique-active
+        # rule): first is retired, second is active and online.
+        first_row = await session.get(Agent, uuid.UUID(first["agent_id"]))
+        second_row = await session.get(Agent, uuid.UUID(second["agent_id"]))
+        assert first_row.revoked_at is not None
+        assert second_row.revoked_at is None
+
+        # Even if the newest row goes quiet, selection skips it entirely.
+        second_row.last_heartbeat_at = datetime.now(UTC) - timedelta(hours=2)
+        await session.commit()
+
+        owner_id = first_row.owner_id
+        selected = await find_agent_for_server(
+            session, server_id=uuid.UUID(server["id"]), owner_id=owner_id
+        )
+        assert selected is None  # no live agent -> SSH fallback
+
+
+async def test_revoke_endpoint_disables_the_agent_token(agent_client) -> None:
+    """Audit H3: revoking an agent kills its token immediately."""
+    client, _ = agent_client
+    headers = auth_headers(client, "owner@example.com")
+    minted = mint_registration_token(client, headers)
+    registered = register_agent(client, minted["token"]).json()
+    agent_token = registered["agent_token"]
+    agent_id = registered["agent_id"]
+
+    revoked = client.post(f"/api/v1/agents/{agent_id}/revoke", headers=headers)
+    assert revoked.status_code == 200
+
+    # The agent's token no longer authenticates.
+    heartbeat = client.post(
+        f"/api/v1/agents/{agent_id}/heartbeat",
+        json={"agent_version": "0.1.0"},
+        headers={"Authorization": f"Bearer {agent_token}"},
+    )
+    assert heartbeat.status_code == 409

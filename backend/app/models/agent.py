@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Index, String
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import Uuid
 
@@ -32,6 +32,17 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_agents_owner_id", "owner_id"),
         Index("ix_agents_server_id", "server_id"),
+        # At most one active agent per server (audit C1/H3): registration
+        # supersedes the previous row, and the database — not just the service
+        # layer — blocks two live agents from competing for one server's
+        # deployments.
+        Index(
+            "uq_agents_active_server",
+            "server_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL AND reported_status = 'active'"),
+            sqlite_where=text("revoked_at IS NULL AND reported_status = 'active'"),
+        ),
     )
 
     owner_id: Mapped[uuid.UUID] = mapped_column(

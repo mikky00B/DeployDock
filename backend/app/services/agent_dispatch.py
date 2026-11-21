@@ -12,21 +12,23 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.models import (
     Agent,
     AgentCommandKind,
     AgentCommandStatus,
+    AgentReportedStatus,
     App,
     AuditLog,
     Deployment,
     DeploymentCommand,
     DeploymentLog,
     DeploymentLogStream,
+    Server,
     User,
 )
 from app.models.deployment import (
@@ -59,6 +61,9 @@ def build_command_payload(app: App, deployment: Deployment, domains: list[str] |
         "deployment_id": str(deployment.id),
         "kind": deployment.kind.value,
         "commit_sha": deployment.commit_sha,
+        # Retained image for a rollback (audit H4): the agent re-runs this
+        # image instead of rebuilding from mutable source. Absent → rebuild.
+        "image_ref": deployment.image_ref,
         "app": {
             "name": app.name,
             "repository_url": app.repository_url,
@@ -74,15 +79,40 @@ def build_command_payload(app: App, deployment: Deployment, domains: list[str] |
     }
 
 
-async def find_agent_for_server(session: AsyncSession, *, server_id: uuid.UUID) -> Agent | None:
+async def find_agent_for_server(
+    session: AsyncSession,
+    *,
+    server_id: uuid.UUID,
+    owner_id: uuid.UUID,
+) -> Agent | None:
+    """The server's agent to dispatch to, or None (SSH fallback).
+
+    Scoped four ways (audit C1/H3):
+    - tenant (agent): the agent row itself must belong to the deployment
+      owner — a foreign agent bound to this server id can never receive
+      commands;
+    - tenant (server): the server must belong to the deployment owner too, so
+      a malformed cross-tenant binding is skipped from either direction;
+    - lifecycle: revoked or retired rows are skipped;
+    - liveness: an agent that stopped heartbeating within the offline window
+      is skipped, so a dead agent cannot hold deployments for a 30-minute
+      lease failure before every deploy.
+    """
+    settings = get_settings()
+    liveness_cutoff = datetime.now(UTC) - timedelta(seconds=settings.agent_offline_after_seconds)
     result = await session.execute(
         select(Agent)
+        .join(Server, Server.id == Agent.server_id)
         .where(
             Agent.server_id == server_id,
-            Agent.reported_status == "active",
+            Agent.owner_id == owner_id,
+            Server.owner_id == owner_id,
+            Agent.reported_status == AgentReportedStatus.active,
             Agent.revoked_at.is_(None),
+            Agent.last_heartbeat_at.is_not(None),
+            Agent.last_heartbeat_at >= liveness_cutoff,
         )
-        .order_by(Agent.created_at.asc())
+        .order_by(Agent.created_at.desc())
         .limit(1)
     )
     return result.scalar_one_or_none()
@@ -138,7 +168,9 @@ async def dispatch_deployment(session: AsyncSession, *, deployment: Deployment) 
     app = await session.get(App, deployment.app_id)
     if app is None:
         return False
-    agent = await find_agent_for_server(session, server_id=deployment.server_id)
+    agent = await find_agent_for_server(
+        session, server_id=deployment.server_id, owner_id=deployment.owner_id
+    )
     if agent is None:
         return False
     enqueued = await enqueue_deployment_command(session, agent=agent, deployment=deployment, app=app)
@@ -192,6 +224,24 @@ async def claim_next_command(
         await session.rollback()
 
 
+async def find_claimed_command_for_deployment(
+    session: AsyncSession,
+    *,
+    deployment_id: uuid.UUID,
+) -> DeploymentCommand | None:
+    """The live claimed command for a deployment, if any — used by cancel to
+    decide whether promotion must wait for the agent to confirm it stopped."""
+    result = await session.execute(
+        select(DeploymentCommand)
+        .where(
+            DeploymentCommand.deployment_id == deployment_id,
+            DeploymentCommand.status == AgentCommandStatus.claimed,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def claim_payload_with_env(
     session: AsyncSession,
     *,
@@ -230,7 +280,13 @@ async def complete_command(
     error_message: str | None,
 ) -> DeploymentCommand | None:
     """Close out a claimed command. Returns None when the command does not
-    belong to this agent or the claim token does not match."""
+    belong to this agent or the claim token does not match.
+
+    When the deployment is already terminal (canceled mid-run — audit H2), the
+    agent's result is the confirmation that it actually stopped: the queued
+    follower is promoted here, not at cancel time, so it never races an
+    execution that is still winding down.
+    """
     command = await session.get(DeploymentCommand, command_id)
     if command is None or command.agent_id != agent.id:
         return None
@@ -244,6 +300,13 @@ async def complete_command(
     command.error_message = error_message
     await session.commit()
     await session.refresh(command)
+
+    if command.deployment_id:
+        deployment = await session.get(Deployment, command.deployment_id)
+        if deployment is not None and deployment.status in TERMINAL_DEPLOYMENT_STATUSES:
+            promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
+            if promoted is not None:
+                await dispatch_deployment(session, deployment=promoted)
     return command
 
 
@@ -334,6 +397,43 @@ async def reclaim_stale_commands(session: AsyncSession, *, lease_seconds: int) -
 
     logger.warning("Reclaimed %s expired agent command(s)", len(stale))
     return len(stale)
+
+
+async def promote_stuck_queued(session: AsyncSession) -> int:
+    """Safety net for the queue invariant (audit M10): promote the oldest
+    queued deployment for every app that has one but nothing dispatchable.
+
+    A queued row is normally promoted by a terminal transition elsewhere; this
+    sweep covers rows stranded by a crash between commit and promotion. Called
+    from the periodic sweeps.
+    """
+    from app.services.deployment_events import deployment_event_bus
+
+    stranded = await session.execute(
+        select(Deployment)
+        .where(
+            Deployment.status == DeploymentStatus.queued,
+            ~exists(
+                select(1).where(
+                    Deployment.app_id == Deployment.app_id,
+                    Deployment.status.in_(DISPATCHABLE_DEPLOYMENT_STATUSES),
+                ).correlate(Deployment)
+            ),
+        )
+        .order_by(Deployment.created_at.asc())
+    )
+    candidates = list(stranded.scalars().all())
+    promoted_count = 0
+    seen_apps: set[uuid.UUID] = set()
+    for candidate in candidates:
+        if candidate.app_id in seen_apps:
+            continue
+        seen_apps.add(candidate.app_id)
+        promoted = await promote_next_queued_deployment(session, app_id=candidate.app_id)
+        if promoted is not None:
+            promoted_count += 1
+            deployment_event_bus.notify(promoted.id)
+    return promoted_count
 
 
 async def _next_sequence(session: AsyncSession, deployment_id: uuid.UUID) -> int:

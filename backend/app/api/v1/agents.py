@@ -9,11 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
-from app.models import Agent, User
+from app.models import Agent, Deployment, DeploymentCommand, User
+from app.models.deployment import TERMINAL_DEPLOYMENT_STATUSES
 from app.schemas.agent import (
     AgentCommandRead,
     AgentCommandResult,
     AgentCommandResultRead,
+    AgentCommandStatusRead,
     AgentEventBatch,
     AgentEventBatchRead,
     AgentHeartbeat,
@@ -35,6 +37,7 @@ from app.services.agent_service import (
     list_agents,
     record_heartbeat,
     register_agent,
+    revoke_agent,
     rotate_agent_token,
 )
 
@@ -173,6 +176,35 @@ async def rotate_token(
     )
 
 
+@router.post("/{agent_id}/revoke", response_model=AgentRead)
+async def revoke_agent_endpoint(
+    agent_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AgentRead:
+    """Retire an agent (audit H3): its token stops authenticating and dispatch
+    skips the row. Use when a server is decommissioned or an agent is replaced
+    outside the normal registration flow."""
+    agent = await get_agent_for_user(session, agent_id=agent_id, current_user=current_user)
+    revoked = await revoke_agent(session, agent=agent, current_user=current_user)
+    return AgentRead(
+        id=revoked.id,
+        owner_id=revoked.owner_id,
+        server_id=revoked.server_id,
+        name=revoked.name,
+        status="offline",
+        agent_version=revoked.agent_version,
+        os=revoked.os_name,
+        arch=revoked.arch,
+        metrics=revoked.metrics,
+        last_heartbeat_at=revoked.last_heartbeat_at,
+        revoked_at=revoked.revoked_at,
+        created_at=revoked.created_at,
+        updated_at=revoked.updated_at,
+    )
+
+
 @router.get("/{agent_id}/commands", response_model=list[AgentCommandRead])
 async def next_commands(
     agent_id: uuid.UUID,
@@ -207,6 +239,36 @@ async def next_commands(
             claim_token=claim_token,
         )
     ]
+
+
+@router.get("/{agent_id}/commands/{command_id}/status", response_model=AgentCommandStatusRead)
+async def command_status(
+    agent_id: uuid.UUID,
+    command_id: uuid.UUID,
+    agent: Annotated[Agent, Depends(get_current_agent)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AgentCommandStatusRead:
+    """Cancellation signal for an executing command (audit H2).
+
+    The agent polls this while a deployment runs; when the deployment row has
+    been canceled, the agent must stop its pipeline before the proxy switch —
+    the point of no return — and report a result. The response is tiny so the
+    poll is cheap.
+    """
+    if agent.id != agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Agent token does not belong to this agent",
+        )
+    command = await session.get(DeploymentCommand, command_id)
+    if command is None or command.agent_id != agent.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Command not found for this agent",
+        )
+    deployment = await session.get(Deployment, command.deployment_id)
+    cancel_requested = deployment is not None and deployment.status in TERMINAL_DEPLOYMENT_STATUSES
+    return AgentCommandStatusRead(cancel_requested=cancel_requested)
 
 
 @router.post("/{agent_id}/commands/{command_id}/result", response_model=AgentCommandResultRead)

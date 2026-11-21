@@ -607,3 +607,62 @@ def test_dockerfile_generated_event_is_logged_for_the_user(agent_deployment_clie
     detail = read_deployment(client, headers, deployment_id)
     lines = [log["line"] for log in detail["logs"]]
     assert any("generated one for the detected node stack" in line for line in lines)
+
+
+def test_canceled_agent_command_defers_promotion_until_the_result(agent_deployment_client) -> None:
+    """Audit H2: canceling an agent-executed deployment must not promote the
+    queued follower immediately — the agent stops asynchronously, and its
+    result is the confirmation. Promotion happens at result time, so the
+    follower never races an execution that is still winding down."""
+    client = agent_deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    server = create_server(client, headers)
+    registered = register_agent_for_server(client, headers, server)
+    app_record = create_app(client, headers, server)
+
+    first_id = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers).json()["id"]
+    command = claim_command(client, registered)[0]
+
+    # A webhook push queues behind the running deployment.
+    from app.services.deployment_service import create_deployment
+
+    async def _queue_second():
+        async with client.async_session() as session:
+            owner = (await session.execute(select(User))).scalar_one()
+            return await create_deployment(
+                session,
+                app_id=uuid.UUID(app_record["id"]),
+                current_user=owner,
+                queue_if_active=True,
+            )
+
+    queued = client.portal.start_task_soon(_queue_second).result(timeout=10)
+
+    # Cancel the running one while the agent holds the claimed command.
+    cancel = client.post(f"/api/v1/deployments/{first_id}/cancel", headers=headers)
+    assert cancel.status_code == 200
+
+    # The agent polls the status endpoint and sees the cancellation.
+    status = client.get(
+        f"/api/v1/agents/{registered['agent_id']}/commands/{command['id']}/status",
+        headers=agent_token_headers(registered),
+    )
+    assert status.status_code == 200
+    assert status.json()["cancel_requested"] is True
+
+    # No promotion yet: the agent has not confirmed it stopped.
+    claimed = claim_command(client, registered)
+    assert claimed == []
+
+    # The agent reports that it stopped; only then is the follower promoted.
+    closed = client.post(
+        f"/api/v1/agents/{registered['agent_id']}/commands/{command['id']}/result",
+        json={"claim_token": command["claim_token"], "succeeded": False, "error": "canceled"},
+        headers=agent_token_headers(registered),
+    )
+    assert closed.status_code == 200
+
+    detail = read_deployment(client, headers, str(queued.id))
+    assert detail["status"] == "pending"
+    promoted = claim_command(client, registered)
+    assert len(promoted) == 1

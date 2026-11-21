@@ -17,8 +17,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.models import Agent, AgentRegistrationToken, AgentReportedStatus, User
+from app.models import Agent, AgentRegistrationToken, AgentReportedStatus, Server, User
 from app.services.audit_service import create_audit_log
+from app.services.server_service import get_server_for_user
 
 REGISTRATION_TOKEN_PREFIX = "dck_rt_"
 AGENT_TOKEN_PREFIX = "dck_at_"
@@ -40,6 +41,12 @@ async def create_registration_token(
     server_id: uuid.UUID | None,
     ttl_seconds: int,
 ) -> tuple[AgentRegistrationToken, str]:
+    # Tenant boundary: a registration token must never be mintable for a
+    # server the caller does not own — otherwise the resulting agent would be
+    # selected for that server's deployments and receive their decrypted
+    # environment variables (audit C1).
+    if server_id is not None:
+        await get_server_for_user(session, server_id=server_id, current_user=current_user)
     token = generate_token(REGISTRATION_TOKEN_PREFIX)
     record = AgentRegistrationToken(
         owner_id=current_user.id,
@@ -76,6 +83,17 @@ async def register_agent(
             detail="Registration token is unknown, expired, or already used",
         )
 
+    # Defense in depth (audit C1): re-validate the token's server binding at
+    # registration, in case an old token was minted before the ownership check
+    # existed or the server changed hands.
+    if record.server_id is not None:
+        server = await session.get(Server, record.server_id)
+        if server is None or server.owner_id != record.owner_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Registration token is not valid for this server",
+            )
+
     agent_token = generate_token(AGENT_TOKEN_PREFIX)
     agent = Agent(
         owner_id=record.owner_id,
@@ -89,6 +107,21 @@ async def register_agent(
         last_heartbeat_at=now,
     )
     record.used_at = now
+    # One active agent per server (audit C1/H3): a re-registration supersedes
+    # the previous agent row, so a stale or compromised agent can never shadow
+    # the new one. The partial unique index is the authority.
+    if record.server_id is not None:
+        stale = await session.execute(
+            select(Agent).where(
+                Agent.server_id == record.server_id,
+                Agent.owner_id == record.owner_id,
+                Agent.revoked_at.is_(None),
+                Agent.reported_status == AgentReportedStatus.active,
+            )
+        )
+        for old_agent in stale.scalars():
+            old_agent.revoked_at = now
+            old_agent.reported_status = AgentReportedStatus.retired
     session.add(agent)
     # Loaded explicitly: lazy loading relationships is not allowed on AsyncSession.
     owner = await session.get(User, record.owner_id)
@@ -125,6 +158,28 @@ async def record_heartbeat(
     if metrics is not None:
         agent.metrics = metrics
     await session.commit()
+
+
+async def revoke_agent(
+    session: AsyncSession,
+    *,
+    agent: Agent,
+    current_user: User,
+) -> Agent:
+    """Retire an agent: its token stops working and dispatch skips it (audit H3)."""
+    agent.revoked_at = datetime.now(UTC)
+    agent.reported_status = AgentReportedStatus.retired
+    await create_audit_log(
+        session,
+        current_user=current_user,
+        action="agent.revoked",
+        entity_type="agent",
+        entity_id=agent.id,
+        metadata={"name": agent.name},
+    )
+    await session.commit()
+    await session.refresh(agent)
+    return agent
 
 
 async def rotate_agent_token(
