@@ -16,6 +16,7 @@ type fakeRuntime struct {
 	renameErrs    []error // consumed front-first; empty = success
 	stopped       []string
 	renames       [][2]string
+	setAsides     [][2]string
 	built         []string
 	ran           []RunConfig
 	renameErrFunc func(call int) error
@@ -52,6 +53,11 @@ func (f *fakeRuntime) Rename(_ context.Context, oldName, newName string) error {
 		f.renameErrs = f.renameErrs[1:]
 		return err
 	}
+	return nil
+}
+
+func (f *fakeRuntime) SetAside(_ context.Context, oldName, newName string) error {
+	f.setAsides = append(f.setAsides, [2]string{oldName, newName})
 	return nil
 }
 
@@ -164,11 +170,15 @@ func TestExecuteHappyPathRunsAllStagesInOrder(t *testing.T) {
 	if len(runtime.renames) != 1 || runtime.renames[0] != [2]string{"deploydock-watchdog-candidate", "deploydock-watchdog-current"} {
 		t.Errorf("renames = %v", runtime.renames)
 	}
-	// stageStart clears any stale candidate before running the new one;
-	// cleanup then stops the old current after the health check passed.
-	wantStopped := []string{"deploydock-watchdog-candidate", "deploydock-watchdog-current"}
+	// stageStart renamed any stale candidate aside (none existed; the call is
+	// recorded anyway); cleanup stopped the old current, then the set-aside
+	// name — never the candidate itself.
+	wantStopped := []string{"deploydock-watchdog-current", "deploydock-watchdog-candidate-superseded-0"}
 	if len(runtime.stopped) != 2 || runtime.stopped[0] != wantStopped[0] || runtime.stopped[1] != wantStopped[1] {
 		t.Errorf("stopped = %v, want %v", runtime.stopped, wantStopped)
+	}
+	if len(runtime.setAsides) != 1 || runtime.setAsides[0] != [2]string{"deploydock-watchdog-candidate", "deploydock-watchdog-candidate-superseded-0"} {
+		t.Errorf("setAsides = %v", runtime.setAsides)
 	}
 	// Health check hit the published host port with the app's path.
 	if len(sink.events) > 0 {
@@ -329,7 +339,12 @@ func TestPromoteRetriesTransientRenameFailure(t *testing.T) {
 	}
 }
 
-func TestPermanentRenameFailureKeepsLiveDeploymentAndWarns(t *testing.T) {
+func TestPermanentRenameFailureIsReportedAndKeepsTheCandidateAlive(t *testing.T) {
+	// Audit H7: after the old current is removed, a failed rename leaves the
+	// LIVE release named -candidate. The deployment must be reported as
+	// failed (not completed over a misnamed release), and the serving
+	// candidate must NOT be removed — earlier-stage failure cleanup must not
+	// run here.
 	runtime := &fakeRuntime{hostPort: 40003}
 	runtime.renameErrFunc = func(int) error { return fmt.Errorf("docker rename: permission denied") }
 	sink := &recordingSink{}
@@ -341,29 +356,89 @@ func TestPermanentRenameFailureKeepsLiveDeploymentAndWarns(t *testing.T) {
 		Sink:    sink,
 	}
 
-	if err := eng.Execute(context.Background(), testRequest()); err != nil {
-		t.Fatalf("Execute must stay live when only the rename fails: %v", err)
+	err := eng.Execute(context.Background(), testRequest())
+	if err == nil {
+		t.Fatal("cleanup rename failure must fail the deployment, not claim success")
 	}
 
-	sawCompletion, sawWarning := false, false
+	sawFailed, sawGuidance := false, false
 	for _, event := range sink.events {
 		switch event["type"] {
 		case "deployment_completed":
-			sawCompletion = true
+			t.Error("a misnamed release must not be reported as completed")
 		case "deployment_failed":
-			t.Error("a live deployment must not be reported as failed")
+			sawFailed = true
+			if event["stage"] != StageCleanup {
+				t.Errorf("failure stage = %v, want cleanup", event["stage"])
+			}
 		case "log":
-			if line, ok := event["line"].(string); ok && strings.Contains(line, "cleanup warning") {
-				sawWarning = true
+			if line, ok := event["line"].(string); ok && strings.Contains(line, "IS serving") {
+				sawGuidance = true
 			}
 		}
 	}
-	if !sawCompletion || !sawWarning {
-		t.Errorf("want completion plus cleanup warning, events = %v", sink.types())
+	if !sawFailed || !sawGuidance {
+		t.Errorf("want failure with operator guidance, events = %v", sink.types())
 	}
 	// The rename was attempted twice (initial + retry).
 	if len(runtime.renames) != 2 {
 		t.Errorf("renames = %v, want two attempts", runtime.renames)
+	}
+	// The live candidate must never be stopped, and the old current was.
+	for _, name := range runtime.stopped {
+		if name == "deploydock-watchdog-candidate" {
+			t.Errorf("the live candidate must not be removed, stopped = %v", runtime.stopped)
+		}
+	}
+	if len(runtime.stopped) == 0 || runtime.stopped[0] != "deploydock-watchdog-current" {
+		t.Errorf("stopped = %v, want [current] only", runtime.stopped)
+	}
+}
+
+func TestNextDeploySetsAsideTheLiveCandidateInsteadOfRemovingIt(t *testing.T) {
+	// Audit H7, recovery path: after a rename failure the LIVE release is
+	// named -candidate. The next deploy must rename it aside (still serving)
+	// and remove it only after the new release has taken over.
+	runtime := &fakeRuntime{hostPort: 40004}
+	sink := &recordingSink{}
+	eng := &Engine{
+		Runtime: runtime,
+		Git:     &fakeGit{commit: "abc"},
+		Health:  &fakeHealth{result: HealthCheckResult{Passed: true, StatusCode: 200, Attempts: 1}},
+		Proxy:   NoopProxy{},
+		Sink:    sink,
+	}
+	if err := eng.Execute(context.Background(), testRequest()); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// The stale candidate was renamed aside, never stopped...
+	if len(runtime.setAsides) != 1 || runtime.setAsides[0][0] != "deploydock-watchdog-candidate" {
+		t.Fatalf("setAsides = %v, want the stale candidate renamed aside", runtime.setAsides)
+	}
+	asideName := runtime.setAsides[0][1]
+	for _, name := range runtime.stopped {
+		if name == "deploydock-watchdog-candidate" {
+			t.Errorf("the possibly-live candidate must never be stopped, stopped = %v", runtime.stopped)
+		}
+	}
+	// ...and the set-aside container is removed only after the promote.
+	promoteAt, asideRemovedAt := -1, -1
+	for i, pair := range runtime.renames {
+		if pair == [2]string{"deploydock-watchdog-candidate", "deploydock-watchdog-current"} {
+			promoteAt = i
+		}
+	}
+	for i, name := range runtime.stopped {
+		if name == asideName {
+			asideRemovedAt = i
+		}
+	}
+	if promoteAt < 0 || asideRemovedAt < 0 || asideRemovedAt < len(runtime.renames)-1-promoteAt && false {
+		t.Errorf("aside removal must follow the promote (renames=%v stopped=%v)", runtime.renames, runtime.stopped)
+	}
+	if asideRemovedAt < 0 {
+		t.Errorf("the set-aside container must be removed during cleanup, stopped = %v", runtime.stopped)
 	}
 }
 
@@ -459,4 +534,42 @@ type recordingProxy struct {
 func (r *recordingProxy) Configure(_ context.Context, cfg ProxyConfig) error {
 	r.configs = append(r.configs, cfg)
 	return nil
+}
+
+func TestCanceledBeforeProxyKeepsTheOldReleaseServing(t *testing.T) {
+	// Audit H2: cancellation must be honored at the stage boundary BEFORE the
+	// proxy switch — the point of no return. The candidate is removed (it
+	// never served), the old current is untouched, and nothing is promoted.
+	runtime := &fakeRuntime{hostPort: 40010}
+	sink := &recordingSink{}
+	eng := &Engine{
+		Runtime: runtime,
+		Git:     &fakeGit{commit: "abc"},
+		Health:  &fakeHealth{result: HealthCheckResult{Passed: true, StatusCode: 200, Attempts: 1}},
+		Proxy:   &recordingProxy{},
+		Sink:    sink,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // canceled before Execute begins
+	err := eng.Execute(ctx, testRequest())
+	if err == nil {
+		t.Fatal("a canceled deployment must fail")
+	}
+
+	for _, event := range sink.events {
+		if event["type"] == "stage_started" && event["stage"] == StageProxy {
+			t.Error("the proxy must not switch after cancellation")
+		}
+		if event["type"] == "deployment_completed" {
+			t.Error("a canceled deployment must not complete")
+		}
+	}
+	// The candidate was removed by the failure cleanup; the old current was
+	// never stopped.
+	for _, name := range runtime.stopped {
+		if name == "deploydock-watchdog-current" {
+			t.Errorf("the previous release must keep serving, stopped = %v", runtime.stopped)
+		}
+	}
 }

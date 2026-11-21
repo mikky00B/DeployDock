@@ -74,17 +74,28 @@ func apiError(status int, raw []byte) error {
 	return fmt.Errorf("API error (%d): %s", status, strings.TrimSpace(string(raw)))
 }
 
-// httpGet builds an authenticated GET request for streaming endpoints.
+// httpGet builds an authenticated GET request for streaming endpoints. It
+// uses a dedicated client with no total timeout (audit H5): the shared 30s
+// client killed every deployment stream longer than 30 seconds. Callers bound
+// the request with their own context instead.
 func httpGet(ctx context.Context, api *API, path string) (*http.Response, error) {
+	return httpGetWithResume(ctx, api, path, "")
+}
+
+func httpGetWithResume(ctx context.Context, api *API, path, lastEventID string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, api.BaseURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
 	if api.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+api.Token)
 	}
-	resp, err := api.HTTP.Do(req)
+	streamClient := &http.Client{} // no total timeout: streams end by server close or ctx cancel
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("could not reach %s: %w", api.BaseURL, err)
 	}

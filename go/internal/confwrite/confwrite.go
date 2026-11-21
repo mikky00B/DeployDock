@@ -34,7 +34,9 @@ func Restore(path string, previous []byte, hadPrevious bool) error {
 }
 
 // WriteAtomic writes via a temp file in the same directory plus rename, so a
-// concurrent reload never observes a half-written config.
+// concurrent reload never observes a half-written config. The file is fsynced
+// and the directory entry fsynced after the rename (audit M5): on power loss
+// the rename can otherwise be visible with empty or stale content behind it.
 func WriteAtomic(path string, data []byte, perm fs.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".deploydock-*")
 	if err != nil {
@@ -50,8 +52,19 @@ func WriteAtomic(path string, data []byte, perm fs.FileMode) error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	if dir, dirErr := os.Open(filepath.Dir(path)); dirErr == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }

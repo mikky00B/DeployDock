@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"time"
 
 	"github.com/deploydock/deploydock/go/internal/caddy"
 	"github.com/deploydock/deploydock/go/internal/client"
@@ -65,13 +66,28 @@ func (s *apiEventSink) Emit(event map[string]any) {
 // result. The SSH-style free-form commands of v1 are deliberately gone: the
 // agent only executes its own staged pipeline (spec §24 — never execute
 // arbitrary commands).
+//
+// Cancellation (audit H2): a watcher polls the control plane while the
+// deployment runs; when the user cancels, the per-command context is canceled
+// and the engine stops at its next stage boundary — before the proxy switch,
+// the point of no return. The result is reported either way so the control
+// plane knows execution ended.
 func executeCommand(ctx context.Context, log *slog.Logger, api *client.Client, state *config.State, cmd *client.Command) error {
+	commandCtx, cancelCommand := context.WithCancel(ctx)
+	defer cancelCommand()
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		watchCancellation(commandCtx, cancelCommand, log, api, state, cmd.ID)
+	}()
+
 	sink := &apiEventSink{api: api, agentID: state.AgentID, agentToken: state.AgentToken, deploymentID: cmd.Payload.DeploymentID, log: log}
 
 	request := engine.Request{
 		DeploymentID: cmd.Payload.DeploymentID,
 		Kind:         cmd.Payload.Kind,
 		CommitSHA:    cmd.Payload.CommitSHA,
+		ImageRef:     cmd.Payload.ImageRef,
 		App: engine.AppSpec{
 			Name:           cmd.Payload.App.Name,
 			RepositoryURL:  cmd.Payload.App.RepositoryURL,
@@ -96,7 +112,8 @@ func executeCommand(ctx context.Context, log *slog.Logger, api *client.Client, s
 		Sink:    sink,
 	}
 
-	err := eng.Execute(ctx, request)
+	err := eng.Execute(commandCtx, request)
+	<-watcherDone
 	result := client.CommandResult{ClaimToken: cmd.ClaimToken, Succeeded: err == nil}
 	if err != nil {
 		result.Error = err.Error()
@@ -108,6 +125,35 @@ func executeCommand(ctx context.Context, log *slog.Logger, api *client.Client, s
 		return fmt.Errorf("deployment %s failed: %w", cmd.Payload.DeploymentID, err)
 	}
 	return nil
+}
+
+// cancelPollInterval is how often an executing command asks the control plane
+// whether the user canceled it. 3s keeps cancel latency well inside the
+// longest stage without meaningful load.
+var cancelPollInterval = 3 * time.Second
+
+// watchCancellation polls the command status until cancellation is observed
+// or the command context ends, then cancels it (audit H2).
+func watchCancellation(ctx context.Context, cancelCommand context.CancelFunc, log *slog.Logger, api *client.Client, state *config.State, commandID string) {
+	ticker := time.NewTicker(cancelPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			status, err := api.GetCommandStatus(ctx, state.AgentID, state.AgentToken, commandID)
+			if err != nil {
+				// Transient poll failures are not cancellations; retry.
+				continue
+			}
+			if status.CancelRequested {
+				log.Info("deployment canceled by user; stopping the pipeline", "command_id", commandID)
+				cancelCommand()
+				return
+			}
+		}
+	}
 }
 
 // proxyManagerOrDefault picks the reverse-proxy manager for this host:

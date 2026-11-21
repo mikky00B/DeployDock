@@ -46,6 +46,17 @@ func main() {
 		email := flags.String("email", "", "account email")
 		password := flags.String("password", "", "account password")
 		_ = flags.Parse(os.Args[2:])
+		passwordOnArgv := false
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name == "password" {
+				passwordOnArgv = true
+			}
+		})
+		if passwordOnArgv {
+			// Audit L1: a secret on argv is readable by any local user via
+			// ps or shell history; prefer DEPLOYDOCK_PASSWORD or the prompt.
+			fmt.Fprintln(os.Stderr, "warning: --password exposes the secret in the process list; prefer DEPLOYDOCK_PASSWORD or the interactive prompt")
+		}
 		err = cli.CmdLogin(ctx, *url, *email, *password)
 	case "logout":
 		err = cli.CmdLogout(ctx)

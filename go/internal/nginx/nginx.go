@@ -72,12 +72,30 @@ func (m *Manager) Configure(ctx context.Context, cfg engine.ProxyConfig) error {
 		// Restore the last good config so the file on disk keeps matching what
 		// nginx is serving from memory; otherwise the next unrelated reload
 		// would drop this app's proxying entirely.
-		if restoreErr := confwrite.Restore(path, previous, hadPrevious); restoreErr != nil {
-			return fmt.Errorf("validation failed (restore previous config: %v): %w", restoreErr, err)
-		}
-		return fmt.Errorf("validation failed (config rolled back): %w", err)
+		return m.restoreAfterFailure(path, previous, hadPrevious, err)
 	}
-	return m.Reload(ctx)
+	if err := m.Reload(ctx); err != nil {
+		// Validation passed but the reload failed: nginx is still serving the
+		// previous config from memory, so the file must go back to match it —
+		// an inconsistent file would take the app down on the next reload
+		// (audit H7). The error still fails the deployment; the previous
+		// release keeps serving.
+		return m.restoreAfterFailure(path, previous, hadPrevious, err)
+	}
+	return nil
+}
+
+// restoreAfterFailure puts the previous config back and wraps the original
+// failure either way. No reload is needed for consistency: on a validation
+// failure the server never saw the new config, and on a reload failure it is
+// still serving the previous one from memory — restoring the file makes disk
+// match what is running (audit H7).
+func (m *Manager) restoreAfterFailure(path string, previous []byte, hadPrevious bool, cause error) error {
+	restoreErr := confwrite.Restore(path, previous, hadPrevious)
+	if restoreErr != nil {
+		return fmt.Errorf("%w (AND config restore failed: %v — manual repair required)", cause, restoreErr)
+	}
+	return fmt.Errorf("%w (config rolled back)", cause)
 }
 
 // Validate runs `nginx -t`.

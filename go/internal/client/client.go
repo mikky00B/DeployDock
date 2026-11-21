@@ -63,6 +63,9 @@ type DeployPayload struct {
 	DeploymentID string  `json:"deployment_id"`
 	Kind         string  `json:"kind"`
 	CommitSHA    string  `json:"commit_sha"`
+	// ImageRef, when present, is the retained image of the deployment being
+	// rolled back to (audit H4): clone and build are skipped.
+	ImageRef string  `json:"image_ref,omitempty"`
 	App          AppSpec `json:"app"`
 }
 
@@ -182,6 +185,23 @@ func (c *Client) PostCommandResult(ctx context.Context, agentID, agentToken, com
 	path := fmt.Sprintf("/api/v1/agents/%s/commands/%s/result", agentID, commandID)
 	var out CommandResultRead
 	return c.call(ctx, http.MethodPost, path, agentToken, result, &out)
+}
+
+// CommandStatus is the poll payload for an executing command.
+type CommandStatus struct {
+	CancelRequested bool `json:"cancel_requested"`
+}
+
+// GetCommandStatus reports whether the user canceled a deployment the agent
+// is executing (audit H2). Transient failures are swallowed: the poller must
+// not kill a healthy deploy because one poll failed.
+func (c *Client) GetCommandStatus(ctx context.Context, agentID, agentToken, commandID string) (CommandStatus, error) {
+	path := fmt.Sprintf("/api/v1/agents/%s/commands/%s/status", agentID, commandID)
+	var out CommandStatus
+	if err := c.call(ctx, http.MethodGet, path, agentToken, nil, &out); err != nil {
+		return CommandStatus{CancelRequested: false}, err
+	}
+	return out, nil
 }
 
 // PostEvents submits a batch of deployment events; failures are non-fatal for

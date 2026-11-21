@@ -71,6 +71,17 @@ func cmdRegister(ctx context.Context, log *slog.Logger, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	tokenOnArgv := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "token" {
+			tokenOnArgv = true
+		}
+	})
+	if tokenOnArgv {
+		// Audit L1: warn when the token was passed on the command line; the
+		// env var keeps it out of ps and shell history.
+		log.Warn("--token exposes the secret in the process list; prefer DEPLOYDOCK_REGISTRATION_TOKEN")
+	}
 	if *token == "" {
 		return fmt.Errorf("a registration token is required: pass --token or DEPLOYDOCK_REGISTRATION_TOKEN")
 	}

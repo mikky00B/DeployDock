@@ -22,7 +22,7 @@ func TestConfigureValidationFailureRestoresPreviousBlock(t *testing.T) {
 	// exercising the restore path without a real Caddy install.
 	m := &Manager{ConfDir: dir, Bin: "deploydock-no-such-caddy"}
 	err := m.Configure(context.Background(), engine.ProxyConfig{AppName: "app", Port: 45671})
-	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+	if err == nil || !strings.Contains(err.Error(), "(config rolled back)") {
 		t.Fatalf("Configure error = %v, want a validation failure", err)
 	}
 
@@ -40,7 +40,7 @@ func TestConfigureValidationFailureRemovesBlockWhenNoneExisted(t *testing.T) {
 	m := &Manager{ConfDir: dir, Bin: "deploydock-no-such-caddy"}
 
 	err := m.Configure(context.Background(), engine.ProxyConfig{AppName: "app", Port: 45671})
-	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+	if err == nil || !strings.Contains(err.Error(), "(config rolled back)") {
 		t.Fatalf("Configure error = %v, want a validation failure", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "app.caddy")); !os.IsNotExist(statErr) {

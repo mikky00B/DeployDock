@@ -27,7 +27,11 @@ type Request struct {
 	DeploymentID string
 	Kind         string // "deploy" or "rollback"
 	CommitSHA    string // target commit; empty means branch head
-	App          AppSpec
+	// ImageRef, when set (rollback of a retained image, audit H4), skips
+	// clone and build entirely: the pipeline starts the known-good artifact
+	// instead of rebuilding from mutable source.
+	ImageRef string
+	App      AppSpec
 }
 
 // AppSpec mirrors the control-plane payload (client.AppSpec) without importing
@@ -69,10 +73,15 @@ type ContainerRuntime interface {
 	// Run starts a detached container publishing its port on 127.0.0.1 with a
 	// random host port, and returns the container id and the chosen host port.
 	Run(ctx context.Context, cfg RunConfig) (containerID string, hostPort int, err error)
-	// StopAndRemove stops and removes a container by name, ignoring absence.
+	// StopAndRemove stops a container (with a grace period so in-flight
+	// requests can drain) and removes it, ignoring absence.
 	StopAndRemove(ctx context.Context, name string) error
 	// Rename renames a container.
 	Rename(ctx context.Context, oldName, newName string) error
+	// SetAside renames a container out of the way, ignoring absence. Used to
+	// clear stale release names without ever stopping a possibly-live
+	// container (audit H7).
+	SetAside(ctx context.Context, oldName, newName string) error
 }
 
 // RunConfig is one container launch.
@@ -153,17 +162,26 @@ func (e *Engine) Execute(ctx context.Context, req Request) error {
 
 	s.emit(map[string]any{"type": "deployment_started"})
 
-	commit, err := e.stageClone(ctx, s, req)
-	if err != nil {
-		return e.fail(s, req, StageClone, err, started)
+	var commit, imageRef string
+	if req.ImageRef != "" {
+		// Retained-image rollback (audit H4): the artifact is already built
+		// and known good — skip clone and build entirely.
+		s.emit(map[string]any{"type": "log", "stream": "system", "line": fmt.Sprintf("rollback using retained image %s", req.ImageRef)})
+		commit, imageRef = req.CommitSHA, req.ImageRef
+	} else {
+		var err error
+		commit, err = e.stageClone(ctx, s, req)
+		if err != nil {
+			return e.fail(s, req, StageClone, err, started)
+		}
+
+		imageRef, err = e.stageBuild(ctx, s, req)
+		if err != nil {
+			return e.fail(s, req, StageBuild, err, started)
+		}
 	}
 
-	imageRef, err := e.stageBuild(ctx, s, req)
-	if err != nil {
-		return e.fail(s, req, StageBuild, err, started)
-	}
-
-	hostPort, err := e.stageStart(ctx, s, req, imageRef)
+	hostPort, asideName, err := e.stageStart(ctx, s, req, imageRef)
 	if err != nil {
 		return e.fail(s, req, StageStart, err, started)
 	}
@@ -172,21 +190,37 @@ func (e *Engine) Execute(ctx context.Context, req Request) error {
 		return e.fail(s, req, StageHealthCheck, err, started)
 	}
 
+	// Cancellation boundary (audit H2): the proxy switch is the point of no
+	// return — after it the candidate is the serving release, and aborting
+	// would mean an outage. Before it, canceling cleanly removes the
+	// candidate while the previous release keeps serving.
+	if err := ctx.Err(); err != nil {
+		return e.fail(s, req, StageProxy, fmt.Errorf("deployment canceled: %w", err), started)
+	}
+
 	if err := e.stageProxy(ctx, s, req, hostPort); err != nil {
 		return e.fail(s, req, StageProxy, err, started)
 	}
 
-	if err := e.stageCleanup(ctx, s, req); err != nil {
-		// The new release is already live and serving traffic here; failing the
-		// deployment would tear down the serving container. Report the leftover
-		// state instead: the next deployment clears stale container names in
-		// stageStart (leftover candidate) and stageCleanup (old current).
-		s.emit(map[string]any{"type": "log", "stream": "system", "line": fmt.Sprintf("cleanup warning: %v (new release is live; the next deployment tidies the container names)", err)})
+	if err := e.stageCleanup(ctx, s, req, asideName); err != nil {
+		// Cleanup failure after the cutover must be reported as a failure —
+		// the release is live but misnamed (audit H7). The candidate is the
+		// serving container now, so unlike earlier-stage failures it must NOT
+		// be removed; the next deploy renames it aside instead (stageStart).
+		s.emit(map[string]any{
+			"type": "deployment_failed", "stage": StageCleanup,
+			"error": err.Error(), "duration_seconds": int(e.now().Sub(started).Seconds()),
+		})
+		s.emit(map[string]any{
+			"type": "log", "stream": "system",
+			"line": fmt.Sprintf("the new release IS serving, as %s — the next deployment will put it in place; do not remove that container", candidateName(req.App.ContainerBase)),
+		})
+		return err
 	}
 
 	emitStageCompleted(s, StageCleanup)
 	duration := int(e.now().Sub(started).Seconds())
-	s.emit(map[string]any{"type": "deployment_completed", "commit_sha": commit, "duration_seconds": duration})
+	s.emit(map[string]any{"type": "deployment_completed", "commit_sha": commit, "image_ref": imageRef, "duration_seconds": duration})
 	return nil
 }
 
@@ -223,32 +257,36 @@ func (e *Engine) stageBuild(ctx context.Context, s sink, req Request) (string, e
 	return imageRef, nil
 }
 
-func (e *Engine) stageStart(ctx context.Context, s sink, req Request, imageRef string) (int, error) {
+func (e *Engine) stageStart(ctx context.Context, s sink, req Request, imageRef string) (int, string, error) {
 	emitStage(s, StageStart)
 	if req.App.Port == 0 {
-		return 0, fmt.Errorf("app port is not configured; the agent deploys containerized apps")
+		return 0, "", fmt.Errorf("app port is not configured; the agent deploys containerized apps")
 	}
-	// A leftover candidate (e.g. the agent died mid-deploy) would collide with
-	// `docker run --name` below and wedge every later deploy; clear it first.
-	if err := e.Runtime.StopAndRemove(ctx, candidateName(req.App.ContainerBase)); err != nil {
-		return 0, fmt.Errorf("clear stale candidate container: %w", err)
+	base := req.App.ContainerBase
+	// A leftover candidate may still be the LIVE release: a cleanup rename
+	// failure leaves the serving container named "-candidate" (audit H7).
+	// Never remove it — rename it aside and keep it serving until this
+	// deploy's own release passes its health check and takes the name.
+	asideName := fmt.Sprintf("%s-superseded-%d", candidateName(base), e.now().UnixNano())
+	if err := e.Runtime.SetAside(ctx, candidateName(base), asideName); err != nil {
+		return 0, "", fmt.Errorf("clear stale candidate container: %w", err)
 	}
 	cfg := RunConfig{
-		Name:        candidateName(req.App.ContainerBase),
+		Name:        candidateName(base),
 		Image:       imageRef,
 		Port:        req.App.Port,
 		Env:         req.App.Env,
 		CPULimit:    req.App.CPULimit,
 		MemoryLimit: req.App.MemoryLimit,
-		Labels:      map[string]string{"deploydock.app": req.App.ContainerBase, "deploydock.role": "candidate"},
+		Labels:      map[string]string{"deploydock.app": base, "deploydock.role": "candidate"},
 	}
 	_, hostPort, err := e.Runtime.Run(ctx, cfg)
 	if err != nil {
-		return 0, fmt.Errorf("start container: %w", err)
+		return 0, "", fmt.Errorf("start container: %w", err)
 	}
 	s.emit(map[string]any{"type": "log", "stream": "system", "line": fmt.Sprintf("candidate container live on 127.0.0.1:%d", hostPort)})
 	emitStageCompleted(s, StageStart)
-	return hostPort, nil
+	return hostPort, asideName, nil
 }
 
 func (e *Engine) stageHealthCheck(ctx context.Context, s sink, req Request, hostPort int) error {
@@ -284,11 +322,13 @@ func (e *Engine) stageProxy(ctx context.Context, s sink, req Request, hostPort i
 }
 
 // stageCleanup swaps the candidate in as the current release and removes the
-// old container: stop old only after the new one is live (spec §17).
-func (e *Engine) stageCleanup(ctx context.Context, s sink, req Request) error {
+// old release and the set-aside container: stop old only after the new one is
+// live (spec §17).
+func (e *Engine) stageCleanup(ctx context.Context, s sink, req Request, asideName string) error {
 	emitStage(s, StageCleanup)
-	current := currentName(req.App.ContainerBase)
-	candidate := candidateName(req.App.ContainerBase)
+	base := req.App.ContainerBase
+	current := currentName(base)
+	candidate := candidateName(base)
 
 	// Stop the old current (it may not exist on first deploy) to free the name.
 	if err := e.Runtime.StopAndRemove(ctx, current); err != nil {
@@ -297,7 +337,26 @@ func (e *Engine) stageCleanup(ctx context.Context, s sink, req Request) error {
 	if err := e.promoteCandidate(ctx, candidate, current); err != nil {
 		return fmt.Errorf("promote candidate: %w", err)
 	}
+	// The set-aside container (and only it) is safe to remove now: this
+	// release is live and serving under the current name.
+	if err := e.Runtime.StopAndRemove(ctx, asideName); err != nil {
+		// The release is live; a leftover set-aside container is only disk
+		// noise, never an outage.
+		s.emit(map[string]any{"type": "log", "stream": "system", "line": fmt.Sprintf("cleanup warning: could not remove set-aside container %s: %v", asideName, err)})
+	}
+	// Dangling intermediate layers accumulate one set per deploy (audit M11).
+	if pruner, ok := e.Runtime.(ImagePruner); ok {
+		if err := pruner.PruneDanglingImages(ctx); err != nil {
+			s.emit(map[string]any{"type": "log", "stream": "system", "line": fmt.Sprintf("cleanup warning: dangling image prune failed: %v", err)})
+		}
+	}
 	return nil
+}
+
+// ImagePruner is the optional disk-hygiene extension of ContainerRuntime
+// (audit M11). Never fails a deployment.
+type ImagePruner interface {
+	PruneDanglingImages(ctx context.Context) error
 }
 
 // promoteCandidate renames the candidate to the current-release name, retrying

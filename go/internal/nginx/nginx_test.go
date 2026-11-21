@@ -30,7 +30,7 @@ func TestConfigureValidationFailureRestoresPreviousConfig(t *testing.T) {
 
 	m := failingValidate(t, dir)
 	err := m.Configure(context.Background(), engine.ProxyConfig{AppName: "app", Port: 45671})
-	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+	if err == nil || !strings.Contains(err.Error(), "(config rolled back)") {
 		t.Fatalf("Configure error = %v, want a validation failure", err)
 	}
 
@@ -49,7 +49,7 @@ func TestConfigureValidationFailureRemovesConfigWhenNoneExisted(t *testing.T) {
 	m := failingValidate(t, dir)
 
 	err := m.Configure(context.Background(), engine.ProxyConfig{AppName: "app", Port: 45671})
-	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+	if err == nil || !strings.Contains(err.Error(), "(config rolled back)") {
 		t.Fatalf("Configure error = %v, want a validation failure", err)
 	}
 

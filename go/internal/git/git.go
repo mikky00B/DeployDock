@@ -29,10 +29,41 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		// Audit H1: repository URLs may embed user:token@ credentials; git
+		// error output echoes them. Redact before the error reaches logs,
+		// events, or email.
 		return string(out), fmt.Errorf("git %s: %w: %s",
-			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+			redactArgs(args), err, redactSecrets(strings.TrimSpace(stderr.String())))
 	}
 	return string(out), nil
+}
+
+// redactArgs masks credential-bearing URLs inside the argument echo.
+func redactArgs(args []string) string {
+	redacted := make([]string, len(args))
+	for i, arg := range args {
+		redacted[i] = redactSecrets(arg)
+	}
+	return strings.Join(redacted, " ")
+}
+
+// redactSecrets masks user:password@ userinfo in URLs. git's own credential
+// helpers never print the password, but a URL passed via argv shows up in
+// error output verbatim.
+func redactSecrets(text string) string {
+	if !strings.Contains(text, "@") {
+		return text
+	}
+ atIndex := strings.Index(text, "://")
+	if atIndex < 0 {
+		return text
+	}
+	rest := text[atIndex+3:]
+	userEnd := strings.IndexAny(rest, "@")
+	if userEnd < 0 {
+		return text
+	}
+	return text[:atIndex+3] + "[REDACTED]@" + rest[userEnd+1:]
 }
 
 // Checkout makes workspace hold the requested commit: a fresh clone when the

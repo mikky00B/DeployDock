@@ -73,12 +73,27 @@ func (m *Manager) Configure(ctx context.Context, cfg engine.ProxyConfig) error {
 	if err := m.Validate(ctx, path); err != nil {
 		// Keep the file on disk consistent with the running server: restore
 		// the last good block rather than deleting it.
-		if restoreErr := confwrite.Restore(path, previous, hadPrevious); restoreErr != nil {
-			return fmt.Errorf("validation failed (restore previous config: %v): %w", restoreErr, err)
-		}
-		return fmt.Errorf("validation failed (config rolled back): %w", err)
+		return m.restoreAfterFailure(path, previous, hadPrevious, err)
 	}
-	return m.Reload(ctx)
+	if err := m.Reload(ctx); err != nil {
+		// Caddy is still running the previous config; restore the file to
+		// match it so the next reload cannot apply a dead upstream (audit H7).
+		return m.restoreAfterFailure(path, previous, hadPrevious, err)
+	}
+	return nil
+}
+
+// restoreAfterFailure puts the previous block back and wraps the original
+// failure either way. No reload is needed for consistency: on a validation
+// failure the server never saw the new block, and on a reload failure it is
+// still serving the previous one from memory — restoring the file makes disk
+// match what is running (audit H7).
+func (m *Manager) restoreAfterFailure(path string, previous []byte, hadPrevious bool, cause error) error {
+	restoreErr := confwrite.Restore(path, previous, hadPrevious)
+	if restoreErr != nil {
+		return fmt.Errorf("%w (AND config restore failed: %v — manual repair required)", cause, restoreErr)
+	}
+	return fmt.Errorf("%w (config rolled back)", cause)
 }
 
 // Validate runs `caddy validate` against one managed block.

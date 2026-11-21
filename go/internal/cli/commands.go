@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 // ---- auth ----
@@ -234,30 +235,61 @@ func CmdDeploy(ctx context.Context, nameArg, configFile string) error {
 
 // followDeployment consumes the deployment SSE stream, printing stage and log
 // events as they arrive (spec §20: streamed agent → control plane → CLI).
+//
+// SSE resume (audit H5): log frames carry id: <sequence>; on a transient
+// drop (non-EOF stream error) the CLI reconnects with Last-Event-ID so
+// nothing is re-downloaded or lost, instead of dying mid-deploy. A clean EOF
+// means the server closed the stream after the terminal status — done.
 func followDeployment(ctx context.Context, api *API, deploymentID string, out io.Writer) error {
-	req, err := httpGet(ctx, api, "/api/v1/deployments/"+deploymentID+"/stream")
-	if err != nil {
-		return err
-	}
-	defer req.Body.Close()
-
-	reader := bufio.NewScanner(req.Body)
-	reader.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	eventType := ""
-	for reader.Scan() {
-		line := reader.Text()
-		switch {
-		case strings.HasPrefix(line, "event:"):
-			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		case strings.HasPrefix(line, "data:"):
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			printSSEEvent(out, eventType, data)
+	path := "/api/v1/deployments/" + deploymentID + "/stream"
+	lastEventID := ""
+	for {
+		req, err := httpGetWithResume(ctx, api, path, lastEventID)
+		if err != nil {
+			return err
 		}
-		if err := ctx.Err(); err != nil {
+
+		reader := bufio.NewScanner(req.Body)
+		reader.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		eventType := ""
+		for reader.Scan() {
+			line := reader.Text()
+			var frameID string
+			switch {
+			case strings.HasPrefix(line, "id:"):
+				frameID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+				continue
+			case strings.HasPrefix(line, "event:"):
+				eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			case strings.HasPrefix(line, "data:"):
+				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				printSSEEvent(out, eventType, data)
+			}
+			if frameID != "" {
+				lastEventID = frameID
+			}
+			if err := ctx.Err(); err != nil {
+				req.Body.Close()
+				return nil
+			}
+		}
+		closeErr := reader.Err()
+		req.Body.Close()
+		if ctx.Err() != nil {
 			return nil
 		}
+		if closeErr == nil {
+			// Clean EOF: the server closes the stream right after the
+			// terminal status frame — the deployment is finished.
+			return nil
+		}
+		// Transient drop: reconnect with the resume cursor after a pause.
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(2 * time.Second):
+		}
 	}
-	return reader.Err()
 }
 
 func printSSEEvent(out io.Writer, eventType, data string) {
