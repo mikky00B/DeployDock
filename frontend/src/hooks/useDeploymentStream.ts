@@ -34,6 +34,10 @@ export function useDeploymentStream(token: string | null, deploymentId: string |
     setState({ logs: [], status: null, error: null, reconnecting: false });
 
     let latestStatus: DeploymentStatus | null = null;
+    // Resume cursor (audit H5): the highest log sequence seen, replayed to the
+    // server as Last-Event-ID so a reconnect resumes instead of re-downloading
+    // the whole log. Deduplication remains only as a safety net.
+    let lastSequence = 0;
     let emptyDrops = 0;
     let reconnectTimer: number | undefined;
     let disposed = false;
@@ -59,7 +63,10 @@ export function useDeploymentStream(token: string | null, deploymentId: string |
       let sawFrame = false;
       try {
         const response = await fetch(`${apiClient.baseUrl}/api/v1/deployments/${deploymentId}/stream`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(lastSequence > 0 ? { "Last-Event-ID": String(lastSequence) } : {}),
+          },
           signal: controller.signal,
         });
 
@@ -80,6 +87,10 @@ export function useDeploymentStream(token: string | null, deploymentId: string |
           buffer = events.pop() ?? "";
           for (const rawEvent of events) {
             sawFrame = true;
+            const frameSequence = parseSseEventId(rawEvent);
+            if (frameSequence !== null && frameSequence > lastSequence) {
+              lastSequence = frameSequence;
+            }
             const frameStatus = handleSseEvent(rawEvent, setState);
             if (frameStatus !== null) {
               latestStatus = frameStatus;
@@ -123,6 +134,14 @@ export function useDeploymentStream(token: string | null, deploymentId: string |
 }
 
 /** Applies one SSE frame. Returns the frame's deployment status, if any. */
+/** The `id:` line of one SSE frame, for the Last-Event-ID resume cursor. */
+function parseSseEventId(rawEvent: string): number | null {
+  const idLine = rawEvent.split("\n").find((line) => line.startsWith("id: "));
+  if (!idLine) return null;
+  const parsed = Number(idLine.slice(4));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 export function handleSseEvent(
   rawEvent: string,
   setState: Dispatch<SetStateAction<StreamState>>,

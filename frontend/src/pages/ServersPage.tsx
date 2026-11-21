@@ -117,7 +117,25 @@ export function ServersPage() {
     setNotice(null);
     setTestingServerId(serverId);
     try {
-      const result = await testServerConnection(token, serverId);
+      let result = await testServerConnection(token, serverId);
+
+      // Audit M12: an unpinned server scans its host key without trusting it.
+      // The operator verifies the fingerprint out-of-band, then pins — the
+      // deploy key is never sent to an unverified host.
+      if (!result.success && result.host_key_fingerprint) {
+        const confirmed = window.confirm(
+          `Host key scanned but not trusted yet. Verify this fingerprint on the server ` +
+            `(ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub):\n\n${result.host_key_fingerprint}\n\n` +
+            `Pin this host key for the deploy connection?`,
+        );
+        if (!confirmed) {
+          setError(result.message);
+          return;
+        }
+        await repinServerHostKey(token, serverId);
+        result = await testServerConnection(token, serverId);
+      }
+
       const refreshed = await listServers(token);
       setServers(refreshed);
       if (result.success) {
