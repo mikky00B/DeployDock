@@ -15,9 +15,13 @@ import hmac
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import App, Deployment, WebhookDelivery, WebhookDeliveryResult
+
+# Audit M1: an unauthenticated endpoint must not buffer unbounded bodies.
+MAX_WEBHOOK_BODY_BYTES = 1 * 1024 * 1024
 
 
 def verify_signature(*, secret: str, signature_header: str | None, raw_body: bytes) -> bool:
@@ -29,18 +33,30 @@ def verify_signature(*, secret: str, signature_header: str | None, raw_body: byt
     return hmac.compare_digest(expected, provided)
 
 
+def github_full_name(repository_url: str | None) -> str | None:
+    """The 'owner/name' a repository URL refers to, or None.
+
+    Exact matching (audit M1): a substring test made `github.com/a/b` match
+    every URL containing `a/b`, cross-tenant. Parsing to owner/name matches
+    only the repository the URL actually points at.
+    """
+    from urllib.parse import urlsplit
+
+    if not repository_url:
+        return None
+    parts = [segment for segment in urlsplit(repository_url).path.split("/") if segment]
+    if len(parts) < 2:
+        return None
+    name = parts[-1].removesuffix(".git")
+    return f"{parts[-2]}/{name}".lower()
+
+
 async def find_candidate_apps(session: AsyncSession, *, full_name: str) -> list[App]:
-    """Apps whose repository_url references this GitHub repo."""
-    needle = full_name.lower()
+    """Apps whose repository URL resolves to exactly this GitHub repo."""
+    target = full_name.lower()
     result = await session.execute(select(App).where(App.auto_deploy.is_(True)))
     apps = list(result.scalars().all())
-    candidates = []
-    for app in apps:
-        url = (app.repository_url or "").lower()
-        # Accept github.com/<owner>/<name> in any common suffix shape.
-        if needle in url:
-            candidates.append(app)
-    return candidates
+    return [app for app in apps if github_full_name(app.repository_url) == target]
 
 
 async def delivery_already_processed(session: AsyncSession, *, delivery_id: str) -> bool:
@@ -59,7 +75,9 @@ async def record_delivery(
     action: str | None,
     result: WebhookDeliveryResult,
     detail: str | None = None,
-) -> None:
+) -> bool:
+    """Persist the delivery outcome. False when a concurrent request recorded
+    the same delivery id first — the database settles the replay race."""
     session.add(
         WebhookDelivery(
             app_id=app_id,
@@ -70,7 +88,14 @@ async def record_delivery(
             detail=detail,
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        # A concurrent request recorded this delivery id first; its outcome
+        # stands and this one is a duplicate.
+        await session.rollback()
+        return False
+    return True
 
 
 def extract_push_info(payload: dict) -> tuple[str | None, str | None, str | None]:

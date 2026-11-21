@@ -267,3 +267,45 @@ def test_push_while_active_queues_instead_of_failing(webhook_client) -> None:
     assert pushed.json()["status"] == DeploymentStatus.queued.value
     assert pushed.json()["commit_sha"] == "2222222"
     assert pushed.json()["webhook_result"] == "queued"
+
+
+def test_invalid_signature_does_not_poison_a_delivery_id(webhook_client) -> None:
+    """Audit M1: an unauthenticated request carrying a real X-GitHub-Delivery
+    id must not record anything — otherwise it would silence the real GitHub
+    delivery before its signature is ever verified."""
+    from app.models import WebhookDelivery
+
+    client = webhook_client
+    async_session = client.async_session
+    headers = auth_headers(client, "owner@example.com")
+    _, secret = setup_webhook_app(client, headers)
+    attacker_payload = push_payload("example/watchdog", commit="evil666")
+
+    # Unsigned request with the delivery id the real push will use.
+    poisoned = deliver(client, "wrong-secret", attacker_payload, delivery_id="d-real")
+    assert poisoned.json()["webhook_result"] == "rejected"
+
+    async def _count():
+        async with async_session() as session:
+            rows = (await session.execute(select(WebhookDelivery))).scalars().all()
+            return list(rows)
+
+    rows = client.portal.start_task_soon(_count).result(timeout=10)
+    assert rows == []  # nothing recorded for an unauthenticated request
+
+    # The real delivery still works.
+    real = deliver(client, secret, push_payload("example/watchdog"), delivery_id="d-real")
+    assert real.json()["webhook_result"] in {"deployed", "queued"}
+
+
+def test_repository_matching_is_exact_not_substring(webhook_client) -> None:
+    """Audit M1: a push to github.com/a/b must not match an app whose URL
+    merely contains a/b (github.com/x/a-b.git, forks, lookalikes)."""
+    client = webhook_client
+    headers = auth_headers(client, "owner@example.com")
+    _, secret = setup_webhook_app(client, headers)
+    # The fixture app points at example/watchdog; a lookalike repo shares the
+    # substring but not the owner/name pair.
+    response = deliver(client, secret, push_payload("evil/watchdog-lookalike"))
+    assert response.json()["webhook_result"] == "ignored"
+    assert response.json()["reason"] == "no matching app"

@@ -17,6 +17,7 @@ from app.services.agent_dispatch import dispatch_deployment
 from app.services.app_service import get_app_for_user
 from app.services.ssh_service import SSHService, get_ssh_service
 from app.services.webhook_service import (
+    MAX_WEBHOOK_BODY_BYTES,
     delivery_already_processed,
     extract_commit_sha,
     extract_push_info,
@@ -62,64 +63,37 @@ async def github_webhook(
 ) -> dict:
     """Receive GitHub events (spec §40). Always answers 202 while logging the
     outcome, so GitHub does not retry storms on rejected deliveries."""
+    # Body cap (audit M1): an unauthenticated endpoint must not buffer
+    # arbitrary amounts of attacker data.
+    declared_length = request.headers.get("content-length")
+    if declared_length and declared_length.isdigit() and int(declared_length) > MAX_WEBHOOK_BODY_BYTES:
+        return {"webhook_result": "rejected", "reason": "payload too large"}
     raw_body = await request.body()
+    if len(raw_body) > MAX_WEBHOOK_BODY_BYTES:
+        return {"webhook_result": "rejected", "reason": "payload too large"}
     delivery_id = x_github_delivery or f"missing-{uuid.uuid4().hex[:12]}"
     event = x_github_event or "unknown"
 
-    if await delivery_already_processed(session, delivery_id=delivery_id):
-        return {"webhook_result": "ignored", "reason": "delivery already processed"}
-
+    # Parse minimally first, verify the signature, and only then touch the
+    # database (audit M1): recording deliveries for unsigned requests lets an
+    # unauthenticated attacker grow the table, and a replay check run before
+    # signature verification would let one poisoned delivery id silence a real
+    # GitHub delivery. Nothing is recorded until the outcome is authenticated.
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError:
-        await record_delivery(
-            session,
-            app_id=None,
-            delivery_id=delivery_id,
-            event=event,
-            action=None,
-            result=WebhookDeliveryResult.rejected,
-            detail="invalid JSON",
-        )
         return {"webhook_result": "rejected", "reason": "invalid JSON"}
 
     if event == "ping":
-        await record_delivery(
-            session,
-            app_id=None,
-            delivery_id=delivery_id,
-            event=event,
-            action=None,
-            result=WebhookDeliveryResult.ignored,
-            detail="ping acknowledged",
-        )
         return {"webhook_result": "ignored", "reason": "ping"}
 
     full_name, branch, head_message = extract_push_info(payload)
     if not full_name or not branch:
-        await record_delivery(
-            session,
-            app_id=None,
-            delivery_id=delivery_id,
-            event=event,
-            action=None,
-            result=WebhookDeliveryResult.ignored,
-            detail="not a push event with repository/branch",
-        )
         return {"webhook_result": "ignored", "reason": "unsupported event"}
 
     candidates = await find_candidate_apps(session, full_name=full_name)
     branch_match = [app for app in candidates if app.branch == branch]
     if not branch_match:
-        await record_delivery(
-            session,
-            app_id=None,
-            delivery_id=delivery_id,
-            event=event,
-            action="push",
-            result=WebhookDeliveryResult.ignored,
-            detail=f"no auto-deploy app for {full_name}@{branch}",
-        )
         return {"webhook_result": "ignored", "reason": "no matching app"}
 
     # Signature verification against each candidate's decrypted secret.
@@ -140,16 +114,11 @@ async def github_webhook(
             break
 
     if verified_app is None:
-        await record_delivery(
-            session,
-            app_id=branch_match[0].id,
-            delivery_id=delivery_id,
-            event=event,
-            action="push",
-            result=WebhookDeliveryResult.rejected,
-            detail="signature verification failed",
-        )
         return {"webhook_result": "rejected", "reason": "signature verification failed"}
+
+    # Authenticated from here on: replay check + outcome recording are safe.
+    if await delivery_already_processed(session, delivery_id=delivery_id):
+        return {"webhook_result": "ignored", "reason": "delivery already processed"}
 
     commit_sha = extract_commit_sha(payload)
     owner = await webhook_owner_for_app(session, app=verified_app)
@@ -172,7 +141,7 @@ async def github_webhook(
         if deployment.status.value == "queued"
         else WebhookDeliveryResult.deployed
     )
-    await record_delivery(
+    recorded = await record_delivery(
         session,
         app_id=verified_app.id,
         delivery_id=delivery_id,
@@ -181,5 +150,7 @@ async def github_webhook(
         result=result,
         detail=f"deployment {deployment.id}",
     )
+    if not recorded:
+        return {"webhook_result": "ignored", "reason": "delivery already processed"}
     response = DeploymentRead.model_validate(deployment).model_dump(mode="json")
     return response | {"webhook_result": result.value}
