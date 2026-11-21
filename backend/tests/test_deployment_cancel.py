@@ -83,7 +83,7 @@ class CancelMidRunSSHService:
     def __init__(self, session_factory: async_sessionmaker) -> None:
         self.session_factory = session_factory
 
-    async def run_command(self, *, command: str, **_) -> SSHCommandResult:
+    async def run_command(self, *, command: str, **kwargs) -> SSHCommandResult:
         if "git rev-parse HEAD" in command:
             return SSHCommandResult(exit_code=0, stdout="abc123\n", stderr="")
         async with self.session_factory() as session:
@@ -96,7 +96,7 @@ class CancelMidRunSSHService:
 
 
 class SuccessfulDeploymentSSHService:
-    async def run_command(self, *, command: str, **_) -> SSHCommandResult:
+    async def run_command(self, *, command: str, **kwargs) -> SSHCommandResult:
         if "git rev-parse HEAD" in command:
             return SSHCommandResult(exit_code=0, stdout="abc123\n", stderr="")
         return SSHCommandResult(exit_code=0, stdout="deployed\n", stderr="")

@@ -62,7 +62,8 @@ def test_required_indexes_are_declared() -> None:
     assert "ix_apps_owner_id" in indexes
     assert "ix_deployments_app_id" in indexes
     assert "ix_deployments_status" in indexes
-    assert "ix_deployment_logs_deployment_id_sequence" in indexes
+    assert "uq_deployment_logs_sequence" in indexes
+    assert "uq_deployments_queued_per_app" in indexes
 
 
 async def test_core_models_can_be_created(session_factory) -> None:

@@ -95,6 +95,16 @@ class Deployment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             postgresql_where=text(DISPATCHABLE_STATUS_PREDICATE),
             sqlite_where=text(DISPATCHABLE_STATUS_PREDICATE),
         ),
+        # At most one queued deployment per app (audit M10): two concurrent
+        # webhook pushes could both queue. A newer push supersedes the queued
+        # one; the database — not the service layer — settles the race.
+        Index(
+            "uq_deployments_queued_per_app",
+            "app_id",
+            unique=True,
+            postgresql_where=text("status = 'queued'"),
+            sqlite_where=text("status = 'queued'"),
+        ),
     )
 
     owner_id: Mapped[uuid.UUID] = mapped_column(
@@ -140,6 +150,15 @@ class Deployment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     healthcheck_status_code: Mapped[int | None] = mapped_column(Integer)
     healthcheck_ok: Mapped[bool | None] = mapped_column(Boolean)
     healthcheck_error: Mapped[str | None] = mapped_column(Text)
+    # Last observable sign of progress (log line, stage event, runner
+    # checkpoint). The orphan sweep uses this instead of created_at (audit
+    # H6): a healthy 40-minute build keeps moving this forward and is never
+    # swept, while a genuinely dead one ages out from its last activity.
+    last_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The container image the agent built for this deployment (audit H4).
+    # Rollback of an agent deployment runs this retained image instead of
+    # rebuilding from mutable source.
+    image_ref: Mapped[str | None] = mapped_column(String(200))
 
     owner = relationship("User", back_populates="deployments")
     app = relationship("App", back_populates="deployments")

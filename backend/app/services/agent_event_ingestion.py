@@ -19,11 +19,14 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
+from app.core.redaction import redact_text
 from app.models import (
     Agent,
+    AgentCommandStatus,
     App,
     AuditLog,
     Deployment,
@@ -43,6 +46,7 @@ from app.services.agent_dispatch import (
 )
 from app.services.deployment_events import deployment_event_bus
 from app.services.email_service import notify_deployment_result
+from app.services.environment_service import merged_app_variables
 
 logger = logging.getLogger("deploydock.agent_events")
 
@@ -81,9 +85,26 @@ async def ingest_events(
     rejected = 0
     # deployment_id → (deployment, next log sequence)
     batch: dict[uuid.UUID, tuple[Deployment, int]] = {}
+    # app_id → the app's decrypted secret values, for log/error redaction
+    # (audit H1): agent-reported lines and errors are persisted, streamed, and
+    # emailed, so anything the app treats as a secret must never survive.
+    secret_values: dict[uuid.UUID, list[str]] = {}
     # app ids whose deployment turned terminal in this batch and whose queued
     # follower should be promoted once the batch is durable
     promote_app_ids: set[uuid.UUID] = set()
+
+    async def _redactor_for(deployment: Deployment) -> Callable[[str], str]:
+        app_id = deployment.app_id
+        if app_id not in secret_values:
+            app = await session.get(App, app_id)
+            env = (
+                await merged_app_variables(session, app=app, settings=get_settings())
+                if app is not None
+                else {}
+            )
+            secret_values[app_id] = [value for value in env.values() if value and len(value) >= 4]
+        values = secret_values[app_id]
+        return lambda text: redact_text(text, values)
 
     def schedule_promote(app_id: uuid.UUID) -> None:
         promote_app_ids.add(app_id)
@@ -100,6 +121,9 @@ async def ingest_events(
             )
             rejected += 1
             continue
+
+        redact = await _redactor_for(deployment)
+        _redact_event(event, redact)
 
         if deployment.id not in batch:
             next_sequence = await _max_sequence(session, deployment.id)
@@ -133,9 +157,27 @@ async def ingest_events(
         batch[deployment.id] = (stored_deployment, batch[deployment.id][1])
         accepted += 1
 
+    # Observable progress for the orphan sweep (audit H6): an agent that is
+    # streaming events is alive, whatever its wall-clock duration.
+    for deployment, _ in batch.values():
+        deployment.last_progress_at = datetime.now(UTC)
+
     await session.commit()
     for deployment_id in batch:
         deployment_event_bus.notify(deployment_id)
+    # Lease renewal (audit H3/H6): any claimed command for a deployment that
+    # just reported progress is still being worked on — extend its lease so
+    # long builds are not failed by the reclaim sweep mid-flight.
+    for deployment_id in batch:
+        await session.execute(
+            update(DeploymentCommand)
+            .where(
+                DeploymentCommand.deployment_id == deployment_id,
+                DeploymentCommand.status == AgentCommandStatus.claimed,
+            )
+            .values(claimed_at=datetime.now(UTC))
+        )
+    await session.commit()
     for app_id in promote_app_ids:
         try:
             promoted = await promote_next_queued_deployment(session, app_id=app_id)
@@ -154,6 +196,17 @@ def _allocator(deployment: Deployment, batch: dict) -> Callable[[], int]:
         return next_sequence
 
     return allocate
+
+
+def _redact_event(event: dict, redact: Callable[[str], str]) -> None:
+    """Redact the free-text fields of one agent event in place (audit H1)."""
+    if isinstance(event.get("line"), str):
+        event["line"] = redact(event["line"])
+    lines = event.get("lines")
+    if isinstance(lines, list):
+        event["lines"] = [redact(str(line)) if isinstance(line, str) else line for line in lines]
+    if isinstance(event.get("error"), str):
+        event["error"] = redact(event["error"])
 
 
 async def _owned_deployment(session: AsyncSession, *, agent: Agent, event: dict) -> Deployment:
@@ -217,6 +270,16 @@ async def _on_stage_completed(
     _add_log(session, deployment, allocate, DeploymentLogStream.system, f"Stage completed: {stage}")
 
 
+MAX_LOG_LINE_CHARS = 16_384
+MAX_LOG_LINES_PER_EVENT = 1000
+
+
+def _truncate(line: str) -> str:
+    if len(line) <= MAX_LOG_LINE_CHARS:
+        return line
+    return line[:MAX_LOG_LINE_CHARS] + "… [truncated]"
+
+
 async def _on_log(
     session: AsyncSession,
     *,
@@ -231,10 +294,10 @@ async def _on_log(
         stream = DeploymentLogStream.stdout
     lines = event.get("lines")
     if isinstance(lines, list):
-        for line in lines:
-            _add_log(session, deployment, allocate, stream, str(line))
+        for line in lines[:MAX_LOG_LINES_PER_EVENT]:
+            _add_log(session, deployment, allocate, stream, _truncate(str(line)))
     elif event.get("line") is not None:
-        _add_log(session, deployment, allocate, stream, str(event["line"]))
+        _add_log(session, deployment, allocate, stream, _truncate(str(event["line"])))
 
 
 async def _on_health_check_passed(
@@ -307,6 +370,11 @@ async def _on_completed(
     commit_sha = event.get("commit_sha") or deployment.commit_sha
     deployment.status = DeploymentStatus.success
     deployment.commit_sha = commit_sha
+    # Retain the image the agent built (audit H4) so a later rollback can
+    # re-run it instead of rebuilding from mutable source.
+    reported_image = event.get("image_ref")
+    if isinstance(reported_image, str) and reported_image:
+        deployment.image_ref = reported_image[:200]
     deployment.finished_at = datetime.now(UTC)
     deployment.exit_code = 0
     reported_duration = event.get("duration_seconds")

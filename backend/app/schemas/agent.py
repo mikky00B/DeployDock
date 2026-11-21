@@ -81,8 +81,16 @@ class AgentCommandResultRead(BaseModel):
     status: str
 
 
+class AgentCommandStatusRead(BaseModel):
+    """Poll payload for an executing command: has the user canceled it?"""
+
+    cancel_requested: bool
+
+
 class AgentEventBatch(BaseModel):
-    events: list[dict]
+    # Bounded input (audit M7): an agent token must not be able to submit an
+    # unbounded batch and exhaust control-plane memory or disk.
+    events: list[dict] = Field(max_length=500)
 
     model_config = ConfigDict(extra="forbid")
 

@@ -74,11 +74,20 @@ async def send_email(settings: Settings, email: OutgoingEmail) -> bool:
         return False
     try:
         await asyncio.to_thread(_deliver_sync, settings, email)
-        logger.info("Email sent: %r -> %s", email.subject, email.to)
+        # Audit L3: recipient addresses are PII — log a redacted form at INFO.
+        logger.info("Email sent: %r -> %s", email.subject, redact_email(email.to))
         return True
     except Exception:
-        logger.exception("Email delivery failed: %r -> %s", email.subject, email.to)
+        logger.exception("Email delivery failed: %r -> %s", email.subject, redact_email(email.to))
         return False
+
+
+def redact_email(address: str) -> str:
+    """a***@example.com — enough to correlate log lines, not enough to PII."""
+    local, separator, domain = address.partition("@")
+    if not separator:
+        return "[REDACTED]"
+    return f"{local[:1]}***@{domain}" if local else "[REDACTED]@{domain}"
 
 
 def email_enabled(settings: Settings) -> bool:

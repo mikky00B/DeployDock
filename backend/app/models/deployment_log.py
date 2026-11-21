@@ -17,7 +17,17 @@ class DeploymentLogStream(str, enum.Enum):
 
 class DeploymentLog(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "deployment_logs"
-    __table_args__ = (Index("ix_deployment_logs_deployment_id_sequence", "deployment_id", "sequence"),)
+    __table_args__ = (
+        # The stream ordering and resume cursor depend on sequences being
+        # unique per deployment (audit M7); the ingestion allocator settles
+        # duplicates against this constraint, not just in memory.
+        Index(
+            "uq_deployment_logs_sequence",
+            "deployment_id",
+            "sequence",
+            unique=True,
+        ),
+    )
 
     deployment_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),

@@ -1,8 +1,9 @@
 import uuid
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -19,6 +20,7 @@ from app.schemas.deployment_log import DeploymentLogRead
 from app.services.app_service import get_app_for_user
 from app.services.audit_service import create_audit_log
 from app.services.deployment_events import deployment_event_bus
+from app.services.email_service import notify_deployment_result
 
 
 async def get_active_deployment(session: AsyncSession, *, app_id: uuid.UUID) -> Deployment | None:
@@ -101,6 +103,20 @@ async def create_deployment(
                     ),
                 )
             superseded = queued_row
+            # Any other queued row (a race the unique index now prevents, but
+            # be thorough) goes superseded too: stale code must not run.
+            await session.execute(
+                update(Deployment)
+                .where(
+                    Deployment.app_id == app.id,
+                    Deployment.status == DeploymentStatus.queued,
+                    Deployment.id != queued_row.id,
+                )
+                .values(
+                    status=DeploymentStatus.superseded,
+                    finished_at=datetime.now(UTC),
+                )
+            )
 
     if superseded is not None:
         superseded.status = DeploymentStatus.superseded
@@ -284,19 +300,28 @@ async def create_rollback_deployment(
     # Checked before anything else: a rollback while a deploy is in flight would
     # fight over the same checkout.
     await _guard_against_concurrent_deployment(session, app_id=source_deployment.app_id)
-    target_commit = await find_previous_successful_commit(
+    target = await find_previous_successful_deployment(
         session,
         source_deployment=source_deployment,
         current_user=current_user,
     )
-    if target_commit is None:
+    if target is None or target.commit_sha is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No previous successful deployment commit is available for rollback",
         )
+    target_commit = target.commit_sha
+
+    from app.services.agent_dispatch import find_agent_for_server
 
     app = await get_app_for_user(session, app_id=source_deployment.app_id, current_user=current_user)
-    if app.restart_command is None and app.service_name is None:
+    # The restart gate only applies to the SSH bridge, which restarts a systemd
+    # service; an agent deployment rolls back as its own Docker cutover, with
+    # no systemd involvement (audit H4).
+    agent = await find_agent_for_server(
+        session, server_id=source_deployment.server_id, owner_id=source_deployment.owner_id
+    )
+    if agent is None and app.restart_command is None and app.service_name is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="App does not have a restart command or service name",
@@ -310,6 +335,10 @@ async def create_rollback_deployment(
         kind=DeploymentKind.rollback,
         commit_sha=target_commit,
         previous_commit_sha=source_deployment.commit_sha,
+        # The retained image of the successful deployment we are rolling back
+        # to, when the agent built one (audit H4): the agent re-runs this image
+        # instead of rebuilding from mutable source.
+        image_ref=target.image_ref,
         triggered_by=current_user.email,
     )
     session.add(rollback_deployment)
@@ -331,6 +360,7 @@ async def create_rollback_deployment(
             "source_deployment_id": str(source_deployment.id),
             "app_id": str(source_deployment.app_id),
             "target_commit": target_commit,
+            "image_ref": target.image_ref,
         },
     )
     await session.commit()
@@ -338,14 +368,16 @@ async def create_rollback_deployment(
     return rollback_deployment
 
 
-async def find_previous_successful_commit(
+async def find_previous_successful_deployment(
     session: AsyncSession,
     *,
     source_deployment: Deployment,
     current_user: User,
-) -> str | None:
+) -> Deployment | None:
+    """The deployment to roll back to: the newest success strictly before the
+    source, with its retained image so the rollback can reuse the artifact."""
     result = await session.execute(
-        select(Deployment.commit_sha)
+        select(Deployment)
         .where(
             Deployment.owner_id == current_user.id,
             Deployment.app_id == source_deployment.app_id,
@@ -365,22 +397,33 @@ async def fail_orphaned_deployments(
     *,
     older_than_seconds: int,
 ) -> int:
-    """Mark deployments stuck in an active status (pending, pipeline stage, running) as failed.
+    """Mark deployments stuck without progress as failed, and finish the
+    transition properly (audit H6).
 
     A deploy runs inside the API process, so a restart, crash, or worker recycle
-    mid-deploy leaves the row non-terminal forever - blocking every later deploy of
-    that app via the concurrency guard. This sweep runs at startup and reclaims them.
-    Returns the number of rows reclaimed.
+    mid-deploy leaves the row non-terminal forever — blocking every later deploy
+    of that app via the concurrency guard. This sweep reclaims them, and unlike
+    a bare status flip it also notifies the SSE stream, sends the failure email,
+    and promotes whatever was queued behind the reclaimed row.
+
+    Rows are aged out from ``last_progress_at`` (falling back to ``created_at``),
+    not ``created_at`` itself: a healthy long build keeps making observable
+    progress and is never swept.
     """
+    from app.services.agent_dispatch import dispatch_deployment, promote_next_queued_deployment
+
     cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
     result = await session.execute(
         select(Deployment).where(
             Deployment.status.in_(ACTIVE_DEPLOYMENT_STATUSES),
-            Deployment.created_at <= cutoff,
+            func.coalesce(Deployment.last_progress_at, Deployment.created_at) <= cutoff,
         )
     )
     orphaned = list(result.scalars().all())
+    if not orphaned:
+        return 0
 
+    affected_apps: set[uuid.UUID] = set()
     for deployment in orphaned:
         deployment.status = DeploymentStatus.failed
         deployment.error_message = (
@@ -392,9 +435,17 @@ async def fail_orphaned_deployments(
             deployment.duration_seconds = max(
                 0, int((deployment.finished_at - _as_utc(deployment.started_at)).total_seconds())
             )
+        affected_apps.add(deployment.app_id)
 
-    if orphaned:
-        await session.commit()
+    await session.commit()
+    for deployment in orphaned:
+        deployment_event_bus.notify(deployment.id)
+        with suppress(Exception):  # noqa: BLE001 - email must not break the sweep
+            await notify_deployment_result(session, deployment_id=deployment.id)
+    for app_id in affected_apps:
+        promoted = await promote_next_queued_deployment(session, app_id=app_id)
+        if promoted is not None:
+            await dispatch_deployment(session, deployment=promoted)
     return len(orphaned)
 
 

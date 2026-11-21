@@ -14,8 +14,9 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.rate_limit import configure_login_rate_limiter
 from app.db.session import AsyncSessionLocal, engine
-from app.services.agent_dispatch import reclaim_stale_commands
+from app.services.agent_dispatch import promote_stuck_queued, reclaim_stale_commands
 from app.services.deployment_service import fail_orphaned_deployments
+from app.services.retention_service import prune_expired_data
 
 settings = get_settings()
 configure_logging(settings.app_env)
@@ -82,24 +83,59 @@ async def lifespan(_: FastAPI):
 async def _periodic_sweeps(every_seconds: int) -> None:
     while True:
         await asyncio.sleep(every_seconds)
-        try:
-            async with AsyncSessionLocal() as session:
-                await reclaim_stale_commands(
-                    session,
-                    lease_seconds=settings.agent_command_lease_seconds,
-                )
-        except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
-            logger.exception("Periodic agent command reclaim failed")
-        try:
-            async with AsyncSessionLocal() as session:
-                reclaimed = await fail_orphaned_deployments(
-                    session,
-                    older_than_seconds=settings.orphan_deployment_timeout_seconds,
-                )
-            if reclaimed:
-                logger.warning("Marked %s stuck deployment(s) as failed", reclaimed)
-        except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
-            logger.exception("Periodic orphaned-deployment sweep failed")
+        # Leader lock (audit H6): with multiple uvicorn workers each would run
+        # its own sweep and could fail another worker's healthy deployment.
+        # Postgres advisory locks elect one sweeper; SQLite (single-process
+        # dev/test) skips the election.
+        async with engine.connect() as connection:
+            if connection.dialect.name == "postgresql":
+                got_lock = (await connection.execute(
+                    text("SELECT pg_try_advisory_lock(728491)")
+                )).scalar_one()
+                if not got_lock:
+                    continue  # another worker is the sweeper this round
+            try:
+                await _run_sweeps_once()
+            finally:
+                if connection.dialect.name == "postgresql":
+                    await connection.execute(text("SELECT pg_advisory_unlock(728491)"))
+
+
+async def _run_sweeps_once() -> None:
+    try:
+        async with AsyncSessionLocal() as session:
+            await reclaim_stale_commands(
+                session,
+                lease_seconds=settings.agent_command_lease_seconds,
+            )
+    except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
+        logger.exception("Periodic agent command reclaim failed")
+    try:
+        async with AsyncSessionLocal() as session:
+            reclaimed = await fail_orphaned_deployments(
+                session,
+                older_than_seconds=settings.orphan_deployment_timeout_seconds,
+            )
+        if reclaimed:
+            logger.warning("Marked %s stuck deployment(s) as failed", reclaimed)
+    except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
+        logger.exception("Periodic orphaned-deployment sweep failed")
+    try:
+        async with AsyncSessionLocal() as session:
+            promoted = await promote_stuck_queued(session)
+        if promoted:
+            logger.warning("Promoted %s stranded queued deployment(s)", promoted)
+    except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
+        logger.exception("Periodic queued-promotion sweep failed")
+    try:
+        async with AsyncSessionLocal() as session:
+            await prune_expired_data(
+                session,
+                log_retention_days=settings.log_retention_days,
+                delivery_retention_days=settings.webhook_delivery_retention_days,
+            )
+    except Exception:  # noqa: BLE001 - the loop must survive a bad sweep
+        logger.exception("Periodic retention sweep failed")
 
 
 app = FastAPI(title="DeployDock API", lifespan=lifespan)

@@ -50,9 +50,16 @@ async def register_user(
     return user
 
 
+# A fixed Argon2 hash verified when the user does not exist, so the response
+# time of a login for an unknown email matches a login for a known one with a
+# wrong password (audit M9: otherwise timing leaks which emails are registered).
+_DUMMY_PASSWORD_HASH = hash_password("deploydock-timing-equalizer")
+
+
 async def authenticate_user(session: AsyncSession, *, email: str, password: str) -> User | None:
     user = await get_user_by_email(session, email.lower())
     if user is None or not user.is_active:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
         return None
     if not verify_password(password, user.hashed_password):
         return None

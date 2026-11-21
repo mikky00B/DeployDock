@@ -39,6 +39,7 @@ class SuccessfulDeploymentSSHService:
         command: str,
         known_host_key: str | None = None,
         timeout_seconds: int = 15,
+        env: dict[str, str] | None = None,
     ) -> SSHCommandResult:
         self.calls.append(SSHCall(command=command, private_key=private_key))
         if "git rev-parse HEAD" in command and len(self.calls) == 1:
@@ -417,37 +418,69 @@ def test_deploy_is_allowed_again_after_the_previous_one_finishes(deployment_clie
     assert second.status_code == 202
 
 
-def test_build_deploy_command_exports_env_inside_the_deploy_shell() -> None:
+def test_build_deploy_command_contains_no_secrets() -> None:
+    """Audit H1: the deploy command is persisted in logs and the process list —
+    env vars must never be exported inline. SSHService delivers them as a
+    remote 0600 env file instead."""
     import shlex
 
     from app.workers.deployment_runner import build_deploy_command
 
-    command = build_deploy_command(
-        "/opt/my app",
-        "make deploy",
-        env={
-            "DATABASE_URL": "postgres://user:p@host/db name",
-            "API_TOKEN": "abc;rm -rf /",
-        },
-    )
-
+    command = build_deploy_command("/opt/my app", "make deploy")
     outer = shlex.split(command)
     assert outer[:2] == ["bash", "-lc"]
+    assert "DATABASE_URL" not in command
+    assert "secret" not in command
     lines = outer[2].splitlines()
     assert lines[0] == "set -e"
     assert lines[1] == "cd '/opt/my app'"
-    # Values with spaces and shell metacharacters arrive intact and quoted.
-    assert lines[2] == "export DATABASE_URL='postgres://user:p@host/db name'"
-    assert lines[3] == "export API_TOKEN='abc;rm -rf /'"
-    # The user's command is the final line, verbatim.
     assert lines[-1] == "make deploy"
+def test_ssh_deploy_passes_env_separately_and_redacts_output(deployment_client) -> None:
+    """Audit H1 end to end: env vars ride the env kwarg (uploaded as a remote
+    0600 file by SSHService), and the deploy output has the secret redacted
+    before it is persisted."""
+    client = deployment_client
+    headers = auth_headers(client, "owner@example.com")
+    app_record = create_app(client, headers)
 
+    environment = client.post(
+        f"/api/v1/apps/{app_record['id']}/environments",
+        json={"name": "production", "server_id": app_record["server_id"], "auto_deploy": True},
+        headers=headers,
+    ).json()
+    put = client.put(
+        f"/api/v1/environments/{environment['id']}/variables/DATABASE_URL",
+        json={"key": "DATABASE_URL", "value": "postgres://canary-secret-string"},
+        headers=headers,
+    )
+    assert put.status_code == 200
 
-def test_build_deploy_command_without_env_unchanged() -> None:
-    import shlex
+    from app.core.redaction import REDACTED
 
-    from app.workers.deployment_runner import build_deploy_command
+    class EchoingSSH:
+        async def run_command(self, *, command: str, env=None, **_):
+            assert "canary-secret-string" not in command
+            if "git pull" in command:
+                # The deploy command: env delivered via the env kwarg, never
+                # inline (audit H1).
+                assert env is not None
+                assert env.get("DATABASE_URL") == "postgres://canary-secret-string"
+                return SSHCommandResult(
+                    exit_code=0,
+                    stdout="connect failed: postgres://canary-secret-string",
+                    stderr="",
+                )
+            return SSHCommandResult(exit_code=0, stdout="abc123", stderr="")
 
-    outer = shlex.split(build_deploy_command("/opt/app", "make build"))
-    lines = outer[2].splitlines()
-    assert lines == ["set -e", "cd /opt/app", "make build"]
+    app.dependency_overrides[get_ssh_service] = lambda: EchoingSSH()
+
+    deploy = client.post(f"/api/v1/apps/{app_record['id']}/deploy", headers=headers)
+    assert deploy.status_code == 202
+
+    detail = client.get(
+        f"/api/v1/deployments/{deploy.json()['id']}", headers=headers
+    ).json()
+    lines = [log["line"] for log in detail["logs"]]
+    assert any(REDACTED in line for line in lines)
+    for line in lines:
+        assert "canary-secret-string" not in line

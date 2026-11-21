@@ -130,7 +130,13 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    await rate_limit.login_rate_limiter.reset(rate_limit_keys)
+    # Reset only the account-scoped buckets on success (audit M2): resetting
+    # the IP bucket would let an attacker holding one valid account clear the
+    # per-IP limit between password-spray rounds. Keys are reset individually
+    # — reset() takes a single key.
+    for key in rate_limit_keys:
+        if not key.startswith("ip:"):
+            await rate_limit.login_rate_limiter.reset(key)
 
     if settings.require_email_verification and not user.email_verified:
         # Correct credentials, unconfirmed address: ask for the code. A fresh

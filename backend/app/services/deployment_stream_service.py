@@ -23,8 +23,20 @@ async def stream_deployment_events(
     deployment_id: uuid.UUID,
     owner_id: uuid.UUID,
     idle_poll_seconds: float = IDLE_POLL_SECONDS,
+    after_sequence: int = 0,
 ) -> AsyncGenerator[str, None]:
-    last_sequence = 0
+    """The deployment log stream as SSE frames.
+
+    ``after_sequence`` is the resume cursor (audit H5): the Last-Event-ID a
+    reconnecting client saw last, so a dropped connection resumes instead of
+    re-downloading the whole log. Every log frame carries ``id: <sequence>``
+    to feed that contract, and ``retry`` tells clients how fast to reconnect.
+    """
+    last_sequence = after_sequence
+
+    # Reconnection speed for any EventSource-style client (audit H5), sent
+    # once up front per the SSE retry contract.
+    yield "retry: 2000\n\n"
 
     while True:
         async with sessionmaker() as session:
@@ -48,6 +60,7 @@ async def stream_deployment_events(
                     "line": log.line,
                     "sequence": log.sequence,
                 },
+                event_id=str(log.sequence),
             )
 
         if deployment is None:
@@ -68,8 +81,9 @@ async def stream_deployment_events(
             yield format_sse("heartbeat", {"status": deployment.status.value})
 
 
-def format_sse(event: str, data: dict[str, object]) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+def format_sse(event: str, data: dict[str, object], event_id: str | None = None) -> str:
+    id_line = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{id_line}event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
 
 
 async def _get_new_logs(

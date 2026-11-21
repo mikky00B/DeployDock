@@ -1,7 +1,8 @@
 import uuid
+from contextlib import suppress
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -12,7 +13,11 @@ from app.models import User
 from app.models.deployment import DeploymentStatus
 from app.schemas.deployment import DeploymentDetailRead, DeploymentRead
 from app.schemas.deployment_log import DeploymentLogRead
-from app.services.agent_dispatch import dispatch_deployment, promote_next_queued_deployment
+from app.services.agent_dispatch import (
+    dispatch_deployment,
+    find_claimed_command_for_deployment,
+    promote_next_queued_deployment,
+)
 from app.services.deployment_service import (
     cancel_deployment,
     create_deployment,
@@ -107,12 +112,18 @@ async def cancel_deployment_endpoint(
     """
     deployment = await cancel_deployment(session, deployment_id=deployment_id, current_user=current_user)
     # A canceled deployment frees the one-active slot: promote (spec §42) and
-    # dispatch whatever was waiting behind it.
-    promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
-    if promoted is not None:
-        dispatched = await dispatch_deployment(session, deployment=promoted)
-        if not dispatched:
-            background_tasks.add_task(runner.run, promoted.id)
+    # dispatch whatever was waiting behind it — unless an agent command is
+    # still claimed for this deployment (audit H2). The agent stops its
+    # pipeline asynchronously and its result is the confirmation that execution
+    # actually ended; complete_command promotes the follower then, so it never
+    # races an execution that is still winding down.
+    claimed = await find_claimed_command_for_deployment(session, deployment_id=deployment.id)
+    if claimed is None:
+        promoted = await promote_next_queued_deployment(session, app_id=deployment.app_id)
+        if promoted is not None:
+            dispatched = await dispatch_deployment(session, deployment=promoted)
+            if not dispatched:
+                background_tasks.add_task(runner.run, promoted.id)
     return DeploymentRead.model_validate(deployment)
 
 
@@ -122,13 +133,21 @@ async def deployment_log_stream(
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     sessionmaker: Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)],
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
 ) -> StreamingResponse:
+    """The live log stream. SSE resume (audit H5): a reconnecting client sends
+    the Last-Event-ID it last saw and only later log lines are replayed."""
     await get_deployment_for_user(session, deployment_id=deployment_id, current_user=current_user)
+    after_sequence = 0
+    if last_event_id:
+        with suppress(ValueError):
+            after_sequence = max(0, int(last_event_id))
     return StreamingResponse(
         stream_deployment_events(
             sessionmaker=sessionmaker,
             deployment_id=deployment_id,
             owner_id=current_user.id,
+            after_sequence=after_sequence,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import shlex
+import uuid
 from dataclasses import dataclass
 
 import asyncssh
@@ -94,12 +96,18 @@ class SSHService:
         command: str,
         known_host_key: str | None,
         timeout_seconds: int = 15,
+        env: dict[str, str] | None = None,
     ) -> SSHCommandResult:
         """Run a command over SSH, verifying the server's host key.
 
         `known_host_key` is the pinned '<algorithm> <base64>' value from the server
         row. It is required: connecting without verification would expose the
         decrypted private key to a man-in-the-middle.
+
+        `env`, when given, is delivered as a 0600 env file uploaded over SFTP and
+        sourced inside the remote shell — never as part of the command string,
+        which would land the values in the remote host's process list and shell
+        audit logs (audit H1). The file is removed by the command itself.
         """
         if not known_host_key:
             raise HostKeyUnpinnedError(
@@ -119,6 +127,22 @@ class SSHService:
                 known_hosts=([asyncssh.import_public_key(expected.stored_value)], [], []),
                 login_timeout=timeout_seconds,
             ) as connection:
+                if env:
+                    # Remote path on the managed host; the uuid suffix makes it
+                    # unguessable and it is removed by the command itself.
+                    env_path = f"/tmp/deploydock-env-{uuid.uuid4().hex}.sh"  # noqa: S108
+                    body = "".join(
+                        f"export {shlex.quote(key_)}={shlex.quote(value)}\n"
+                        for key_, value in env.items()
+                    )
+                    async with connection.start_sftp() as sftp:
+                        async with sftp.open(env_path, "w") as env_file:
+                            await env_file.write(body)
+                        await sftp.chmod(env_path, 0o600)
+                    command = (
+                        f"set -a\n. {shlex.quote(env_path)}\nset +a\n"
+                        f"{command}\nrm -f {shlex.quote(env_path)}"
+                    )
                 result = await connection.run(command, check=False, timeout=timeout_seconds)
         except asyncssh.HostKeyNotVerifiable as exc:
             raise HostKeyMismatchError(

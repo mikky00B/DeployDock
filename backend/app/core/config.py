@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # Only enable behind a reverse proxy you control, otherwise clients can
     # spoof their address.
     trust_proxy_headers: bool = Field(default=False, alias="TRUST_PROXY_HEADERS")
+    # Data retention (audit M11): terminal deployments' logs and webhook
+    # deliveries older than these windows are pruned by the periodic sweep.
+    log_retention_days: int = Field(default=30, alias="LOG_RETENTION_DAYS")
+    webhook_delivery_retention_days: int = Field(default=30, alias="WEBHOOK_DELIVERY_RETENTION_DAYS")
     # /metrics is unauthenticated in development but hidden in production
     # unless a shared token is set: the endpoint reveals fleet sizes (servers,
     # apps, agents online), which is reconnaissance on an internet-facing

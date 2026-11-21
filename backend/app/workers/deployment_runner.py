@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
+from app.core.redaction import redact_text
 from app.core.secrets import decrypt_secret
 from app.models import App, Deployment, DeploymentLog, Server
 from app.models.deployment import TERMINAL_DEPLOYMENT_STATUSES, DeploymentStatus
@@ -83,20 +84,24 @@ class DeploymentRunner:
                         DeploymentLogStream.system,
                         f"Previous commit: {previous_commit}", sequence)
 
+                deploy_env = await merged_app_variables(session, app=app, settings=self.settings)
                 result = await self.ssh_service.run_command(
                     host=server.host,
                     port=server.port,
                     username=server.username,
                     private_key=private_key,
-                    command=build_deploy_command(
-                        app.app_path,
-                        app.deploy_command,
-                        env=await merged_app_variables(session, app=app, settings=self.settings),
-                    ),
+                    command=build_deploy_command(app.app_path, app.deploy_command),
                     known_host_key=server.known_host_key,
                     timeout_seconds=self.settings.deploy_timeout_seconds,
+                    env=deploy_env,
                 )
-                await self._save_command_output(session, deployment, result, sequence)
+                await self._save_command_output(
+                    session,
+                    deployment,
+                    result,
+                    sequence,
+                    secret_values=deploy_env,
+                )
                 await session.commit()
                 deployment_event_bus.notify(deployment.id)
 
@@ -397,11 +402,18 @@ class DeploymentRunner:
         deployment: Deployment,
         result: SSHCommandResult,
         sequence: Iterator[int],
+        secret_values: dict[str, str] | None = None,
     ) -> None:
+        # Audit H1: deploy output is persisted, streamed, and emailed — redact
+        # the deployment's own secret values plus credential patterns before
+        # any of it is stored.
+        values = (secret_values or {}).values()
         for line in result.stdout.splitlines():
-            await self._add_log(session, deployment, DeploymentLogStream.stdout, line, sequence)
+            redacted = redact_text(line, values)
+            await self._add_log(session, deployment, DeploymentLogStream.stdout, redacted, sequence)
         for line in result.stderr.splitlines():
-            await self._add_log(session, deployment, DeploymentLogStream.stderr, line, sequence)
+            redacted = redact_text(line, values)
+            await self._add_log(session, deployment, DeploymentLogStream.stderr, redacted, sequence)
 
     async def _add_log(
         self,
@@ -411,6 +423,9 @@ class DeploymentRunner:
         line: str,
         sequence: Iterator[int],
     ) -> None:
+        # Every observable output moves the progress forward (audit H6), so the
+        # orphan sweep ages dead deployments out from their last activity.
+        deployment.last_progress_at = datetime.now(UTC)
         log = DeploymentLog(
             deployment_id=deployment.id,
             stream=stream,
@@ -425,19 +440,14 @@ def build_git_commit_command(app_path: str) -> str:
     return f"cd {shlex.quote(app_path)} && git rev-parse HEAD"
 
 
-def build_deploy_command(app_path: str, deploy_command: str, env: dict[str, str] | None = None) -> str:
-    """Wrap the user's deploy command with quoting and environment variables.
+def build_deploy_command(app_path: str, deploy_command: str) -> str:
+    """Wrap the user's deploy command with quoting.
 
-    Variables are exported inside the deploy shell only; they reach commands
-    run in that shell (e.g. `pip install`, app servers started in-place), not
-    systemd services restarted by the command — the agent path delivers them
-    to the container instead.
+    Environment variables are delivered by SSHService as a remote 0600 env
+    file sourced inside this shell (audit H1) — never exported inline, which
+    would put the values into the remote process list and shell audit logs.
     """
-    script_lines = ["set -e", f"cd {shlex.quote(app_path)}"]
-    for key, value in (env or {}).items():
-        script_lines.append(f"export {shlex.quote(key)}={shlex.quote(value)}")
-    script_lines.append(deploy_command)
-    script = "\n".join(script_lines)
+    script = f"set -e\ncd {shlex.quote(app_path)}\n{deploy_command}"
     return "bash -lc " + shlex.quote(script)
 
 
@@ -450,6 +460,11 @@ def build_rollback_command(app: App, target_commit: str) -> str:
         "set -e",
         f"cd {shlex.quote(app.app_path)}",
         "git fetch",
+        # Preflight (audit H4): fail before mutating anything if the target
+        # commit no longer exists (force-push, GC) — never leave a partial
+        # checkout behind.
+        f"git cat-file -e {shlex.quote(target_commit + '^{{commit}}')} || "
+        f"(echo 'rollback target {target_commit} no longer exists in the repository' >&2 && exit 1)",
         f"git checkout {shlex.quote(target_commit)}",
     ]
     if restart_command:

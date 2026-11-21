@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import datetime
 
@@ -38,8 +39,10 @@ class EnvironmentRead(BaseModel):
 
 
 class VariableSet(BaseModel):
-    key: str = Field(min_length=1, max_length=255)
-    value: str = Field(min_length=1)
+    # Shell/POSIX-safe key names, bounded values (audit M6): the values reach
+    # remote shells and docker env files; a huge value bloats both.
+    key: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    value: str = Field(min_length=1, max_length=65_536)
 
 
 class VariableRead(BaseModel):
@@ -48,13 +51,23 @@ class VariableRead(BaseModel):
     set: bool = True
 
 
+# DNS hostname: labels of letters/digits/hyphens, no underscores or other
+# characters that would one day be interpolated into proxy configs (audit M6).
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+
+
 class DomainCreate(BaseModel):
     hostname: str = Field(min_length=3, max_length=255)
 
     @field_validator("hostname")
     @classmethod
-    def hostname_is_lowercased(cls, value: str) -> str:
-        return value.strip().lower()
+    def hostname_is_valid_and_lowercased(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not _HOSTNAME_RE.match(normalized):
+            raise ValueError("Hostname must be a valid DNS name")
+        return normalized
 
 
 class DomainRead(BaseModel):

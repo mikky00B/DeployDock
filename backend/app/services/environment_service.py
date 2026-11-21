@@ -1,5 +1,6 @@
 """Environments, environment variables, and domains (spec §12, §36, §38)."""
 
+import asyncio
 import socket
 import uuid
 
@@ -252,10 +253,13 @@ async def verify_domain(
     """Verify by DNS: the hostname must resolve to the server's IP (spec §36).
 
     Resolves both the domain and the server host from the control plane's
-    vantage point; an A-record match marks the domain verified.
+    vantage point; an A-record match marks the domain verified. Resolution
+    runs in a worker thread with a timeout (audit M4): socket.getaddrinfo is
+    blocking, and on the event loop it would stall every request and SSE
+    stream behind a slow resolver.
     """
-    expected_ips = _resolve(server.host)
-    resolved_ips = _resolve(domain.hostname)
+    expected_ips = await asyncio.wait_for(asyncio.to_thread(_resolve, server.host), timeout=10)
+    resolved_ips = await asyncio.wait_for(asyncio.to_thread(_resolve, domain.hostname), timeout=10)
     verified = bool(expected_ips) and bool(set(expected_ips) & set(resolved_ips))
 
     if verified:
