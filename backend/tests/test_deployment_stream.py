@@ -71,6 +71,16 @@ def add_log(session, deployment, line: str, sequence: int) -> None:
     )
 
 
+async def collect_stream(**kwargs):
+    """stream_deployment_events without the SSE retry hint frame — tests
+    assert on application events, not transport hints."""
+    retry_frame = "retry: 2000" + chr(10) + chr(10)
+    async for event in stream_deployment_events(**kwargs):
+        if event == retry_frame:
+            continue
+        yield event
+
+
 def test_format_sse_shape() -> None:
     assert format_sse("log", {"line": "hi"}) == 'event: log\ndata: {"line":"hi"}\n\n'
 
@@ -84,7 +94,7 @@ async def test_stream_replays_existing_logs_then_terminates(session_factory) -> 
 
     events = [
         event
-        async for event in stream_deployment_events(
+        async for event in collect_stream(
             sessionmaker=session_factory,
             deployment_id=deployment.id,
             owner_id=deployment.owner_id,
@@ -105,7 +115,7 @@ async def test_stream_terminates_on_rolled_back_status(session_factory) -> None:
 
     events = [
         event
-        async for event in stream_deployment_events(
+        async for event in collect_stream(
             sessionmaker=session_factory,
             deployment_id=deployment.id,
             owner_id=deployment.owner_id,
@@ -122,7 +132,7 @@ async def test_stream_terminates_for_rolled_back_deployments(session_factory) ->
 
     events = [
         event
-        async for event in stream_deployment_events(
+        async for event in collect_stream(
             sessionmaker=session_factory,
             deployment_id=deployment.id,
             owner_id=deployment.owner_id,
@@ -140,7 +150,7 @@ async def test_stream_terminates_for_canceled_deployments(session_factory) -> No
 
     events = [
         event
-        async for event in stream_deployment_events(
+        async for event in collect_stream(
             sessionmaker=session_factory,
             deployment_id=deployment.id,
             owner_id=deployment.owner_id,
@@ -157,7 +167,7 @@ async def test_stream_reports_not_found_for_another_owner(session_factory) -> No
 
     events = [
         event
-        async for event in stream_deployment_events(
+        async for event in collect_stream(
             sessionmaker=session_factory,
             deployment_id=deployment.id,
             owner_id=uuid.uuid4(),
@@ -177,6 +187,7 @@ async def test_stream_emits_a_heartbeat_when_idle(session_factory) -> None:
         owner_id=deployment.owner_id,
         idle_poll_seconds=0.01,
     )
+    assert (await anext(generator)) == "retry: 2000\n\n"  # SSE retry hint frame
     first = await anext(generator)
     await generator.aclose()
 
@@ -205,7 +216,9 @@ async def test_stream_wakes_immediately_on_a_notification(session_factory) -> No
 
     writer = asyncio.create_task(write_log_then_notify())
     try:
-        # Without the notification this would block for idle_poll_seconds.
+        # The SSE retry hint frame comes first; the notification must then wake
+        # the stream immediately (this would time out without the bus).
+        assert (await asyncio.wait_for(anext(generator), timeout=5)) == "retry: 2000\n\n"
         event = await asyncio.wait_for(anext(generator), timeout=5)
     finally:
         await writer
@@ -242,3 +255,30 @@ async def test_event_bus_cleans_up_its_waiters() -> None:
     await bus.wait(deployment_id, timeout=0.01)
 
     assert deployment_id not in bus._waiters
+
+
+async def test_stream_resumes_from_the_last_event_id(session_factory) -> None:
+    """Audit H5: a reconnecting client sends its cursor (Last-Event-ID) and
+    only later lines are replayed — not the whole log again."""
+    async with session_factory() as session:
+        deployment = await seed_deployment(session, status=DeploymentStatus.success)
+        add_log(session, deployment, "one", 1)
+        add_log(session, deployment, "two", 2)
+        add_log(session, deployment, "three", 3)
+        await session.commit()
+
+    events = [
+        event
+        async for event in collect_stream(
+            sessionmaker=session_factory,
+            deployment_id=deployment.id,
+            owner_id=deployment.owner_id,
+            after_sequence=1,
+        )
+    ]
+
+    assert any('"sequence":2' in event and "two" in event for event in events)
+    assert any('"sequence":3' in event and "three" in event for event in events)
+    assert not any("one" in event for event in events)
+    # Log frames carry the id: line that feeds Last-Event-ID.
+    assert any(event.startswith("id: 2\n") for event in events)
