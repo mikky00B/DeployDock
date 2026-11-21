@@ -77,6 +77,31 @@ else
     rm -f backend/.env.bak
 fi
 
+# A real database password (audit M8): Compose defaults to deploydock, which
+# is reachable from any container on the host. The root .env feeds Compose's
+# variable interpolation for the db/api/migrate services.
+if [ -f .env ] && grep -q "^POSTGRES_PASSWORD=" .env; then
+    log ".env already defines POSTGRES_PASSWORD — keeping it"
+else
+    log "Generating the database password into .env..."
+    pg_password="$(generate_secret)"
+    if [ -f .env ]; then
+        sed -i.bak "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${pg_password}|" .env && rm -f .env.bak
+    else
+        printf 'POSTGRES_PASSWORD=%s\n' "${pg_password}" > .env
+    fi
+fi
+
+# Public mode (audit M8): an installer on a public VPS must not run with the
+# development guardrails off.
+if [ "${DEPLOYDOCK_PUBLIC:-0}" = "1" ]; then
+    log "Public mode: switching APP_ENV to production..."
+    sed -i.bak -e "s|^APP_ENV=.*|APP_ENV=production|" backend/.env && rm -f backend/.env.bak
+    log "Production mode enforces strong secrets and closes /metrics. Before"
+    log "exposing the ports: set CORS_ORIGINS to your dashboard URL and put TLS"
+    log "in front of both services (docs/configuration.md)."
+fi
+
 # --- Bring the stack up. ------------------------------------------------------
 log "Building and starting the stack (this can take a few minutes on first run)..."
 $COMPOSE up -d --build
@@ -102,7 +127,7 @@ cat <<'EOF'
 
   Next steps:
     - Open the dashboard and create your account.
-    - Before exposing DeployDock beyond localhost, follow the production
-      guardrails in docs/configuration.md (APP_ENV=production, real CORS
-      origins, TLS in front of both ports).
+    - Before exposing DeployDock beyond localhost, re-run with
+      DEPLOYDOCK_PUBLIC=1 and follow the production guardrails in
+      docs/configuration.md (real CORS origins, TLS in front of both ports).
 EOF
