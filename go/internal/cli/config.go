@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -87,31 +88,83 @@ type ProjectConfig struct {
 }
 
 // LoadProjectConfig reads ./deploydock.yaml (or a --file override).
+// It tracks top-level YAML sections so nested keys in unrelated blocks
+// (such as env.path) cannot overwrite health.path, skips comments, and
+// validates port and health path values.
 func LoadProjectConfig(path string) (*ProjectConfig, error) {
 	raw, err := os.ReadFile(path) //nolint:gosec // user-specified project file
 	if err != nil {
 		return nil, fmt.Errorf("could not read %s: %w", path, err)
 	}
 	project := &ProjectConfig{}
-	for _, line := range strings.Split(string(raw), "\n") {
-		key, value, ok := strings.Cut(line, ":")
+	section := ""
+
+	for lineNum, rawLine := range strings.Split(string(raw), "\n") {
+		line := strings.TrimRight(rawLine, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		key, value, ok := strings.Cut(trimmed, ":")
 		if !ok {
 			continue
 		}
-		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		switch key {
-		case "name":
-			project.Name = strings.Trim(value, `"'`)
-		case "port":
-			fmt.Sscanf(value, "%d", &project.Port)
-		case "path":
-			project.Health = strings.Trim(value, `"'`)
+		key = strings.TrimSpace(key)
+		value = stripInlineComment(strings.TrimSpace(value))
+
+		if indent == 0 {
+			if value == "" {
+				section = key
+				continue
+			}
+			section = ""
+			if key == "name" {
+				project.Name = strings.Trim(value, `"'`)
+			}
+			continue
+		}
+
+		switch {
+		case section == "deploy" && key == "port":
+			port, err := strconv.Atoi(strings.Trim(value, `"'`))
+			if err != nil || port < 1 || port > 65535 {
+				return nil, fmt.Errorf("%s:%d: invalid deploy.port %q (must be 1-65535)", path, lineNum+1, value)
+			}
+			project.Port = port
+		case section == "health" && key == "path":
+			healthPath := strings.Trim(value, `"'`)
+			if healthPath != "" && !strings.HasPrefix(healthPath, "/") {
+				return nil, fmt.Errorf("%s:%d: invalid health.path %q (must start with '/')", path, lineNum+1, healthPath)
+			}
+			project.Health = healthPath
 		}
 	}
+
 	if project.Name == "" {
 		return nil, fmt.Errorf("%s is missing a 'name:' entry", path)
 	}
 	return project, nil
+}
+
+func stripInlineComment(value string) string {
+	if len(value) == 0 {
+		return value
+	}
+	if value[0] == '"' || value[0] == '\'' {
+		quote := value[0]
+		for i := 1; i < len(value); i++ {
+			if value[i] == quote {
+				return value[:i+1]
+			}
+		}
+		return value
+	}
+	if idx := strings.Index(value, " #"); idx != -1 {
+		return strings.TrimSpace(value[:idx])
+	}
+	return value
 }
 
 // ResolveCredentials applies the mcp-setup environment fallbacks to a loaded

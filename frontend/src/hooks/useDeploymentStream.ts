@@ -182,6 +182,10 @@ export function handleSseEvent(
 }
 
 function appendLog(logs: DeploymentLog[], nextLog: DeploymentLog) {
+  const last = logs[logs.length - 1];
+  if (last && nextLog.sequence > last.sequence) {
+    return [...logs, nextLog];
+  }
   if (logs.some((log) => log.sequence === nextLog.sequence)) {
     return logs;
   }

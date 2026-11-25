@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AppShell } from "./components/layout/AppShell";
 import { stashPostAuthRedirect } from "./components/common";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
@@ -26,9 +27,11 @@ const PAGE_TITLES: Record<AppRoute, string> = {
 
 function App() {
   return (
-    <AuthProvider>
-      <RouterView />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <RouterView />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
 
